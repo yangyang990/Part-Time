@@ -1,0 +1,512 @@
+import {
+  state, api, html, raw, mount, $, $$, busy, toast, modal, confirmDialog, icons,
+  fmtRange, fmtDateTime, fmtTime, fmtDate, payLabel, money, fmtDistance, toLocalInput, relTime,
+  rankBadge, rankByKey, stars, avatar, statusChip, empty, tagChips, termsBlock, lateMinutes,
+} from './ui.js';
+import { siteMap, pickerMap, geocode } from './map.js';
+import { getPosition } from './ui.js';
+
+export async function route(path, view) {
+  let m;
+  if (path === '/' || path === '/events') return eventsList(view);
+  if (path === '/events/new') return eventForm(view);
+  if ((m = path.match(/^\/events\/(\d+)\/edit$/))) return eventForm(view, Number(m[1]));
+  if ((m = path.match(/^\/events\/(\d+)$/))) return eventManage(view, Number(m[1]));
+  if (path === '/crew') return crewList(view);
+  if ((m = path.match(/^\/crew\/(\d+)$/))) return crewDetail(view, Number(m[1]));
+  location.replace('#/events');
+}
+
+const isLive = (e) => new Date(e.start_at) <= new Date() && new Date(e.end_at) > new Date();
+
+// ---------------------------------------------------------------- events list
+
+async function eventsList(view) {
+  const { events } = await api('/api/admin/events');
+  const now = new Date();
+  const upcoming = events.filter((e) => new Date(e.end_at) > now).reverse();
+  const past = events.filter((e) => new Date(e.end_at) <= now);
+  const pendingTotal = upcoming.reduce((n, e) => n + e.pending_count, 0);
+
+  const card = (e) => html`
+    <a class="card event-card" href="#/events/${e.id}">
+      <div class="event-card-head">
+        <h3>${e.title}</h3>
+        ${isLive(e) ? html`<span class="chip chip-live">Live now</span>` : statusChip(e.status)}
+      </div>
+      <div class="meta">
+        <span>${raw(icons.clock)}${fmtRange(e.start_at, e.end_at)}</span>
+        <span>${raw(icons.pin)}${e.location_name}</span>
+        <span>${raw(icons.cash)}${payLabel(e)}</span>
+      </div>
+      <div class="event-card-foot">
+        <span class="fill"><span class="fill-bar"><span style="width:${Math.min(100, (e.approved_count / e.slots) * 100)}%"></span></span>
+          ${e.approved_count}/${e.slots} crew</span>
+        ${e.pending_count ? html`<span class="chip chip-pending">${e.pending_count} to review</span>` : ''}
+        ${isLive(e) ? html`<span class="muted">${e.checked_in_count} checked in</span>` : ''}
+        ${e.min_rank !== 'rookie' ? rankBadge(rankByKey(e.min_rank)) : ''}
+      </div>
+    </a>`;
+
+  mount(view, html`
+    <div class="page-head">
+      <div><h1>Events</h1><p class="muted">${upcoming.length} upcoming${pendingTotal ? html` · <b>${pendingTotal} applications</b> waiting for you` : ''}</p></div>
+      <a class="btn btn-primary" href="#/events/new">${raw(icons.plus)} New event</a>
+    </div>
+    ${events.length === 0 ? empty('No events yet', 'Create your first event: set the place, time, pay and dress code, then crew can apply.',
+      html`<a class="btn btn-primary" href="#/events/new">${raw(icons.plus)} Create event</a>`) : ''}
+    ${upcoming.length ? html`<h2 class="section-title">Upcoming &amp; live</h2><div class="grid">${upcoming.map(card)}</div>` : ''}
+    ${past.length ? html`<h2 class="section-title">Past</h2><div class="grid grid-muted">${past.map(card)}</div>` : ''}`);
+}
+
+// ---------------------------------------------------------------- create / edit
+
+export const SKILL_PRESETS = ['Sales', 'Promotion', 'Product sampling', 'Usher', 'Crowd control', 'Event setup',
+  'MC / Host', 'Cashier', 'Customer service', 'Booth crew', 'Flyering', 'Driving'];
+export const LANGUAGE_PRESETS = ['English', 'Malay', 'Chinese (Mandarin)', 'Cantonese', 'Hokkien', 'Tamil'];
+const splitTags = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
+
+const DRESS_PRESETS = ['Black T-shirt', 'All black', 'White shirt, black pants', 'Smart casual', 'Formal', 'Closed shoes', 'Uniform provided'];
+
+async function eventForm(view, id) {
+  let e;
+  if (id) e = (await api(`/api/admin/events/${id}`)).event;
+  else {
+    const start = new Date(); start.setDate(start.getDate() + 1); start.setHours(10, 0, 0, 0);
+    const end = new Date(start); end.setHours(18);
+    e = { title: '', description: '', location_name: '', lat: null, lng: null, radius_m: 200,
+      start_at: start.toISOString(), end_at: end.toISOString(), pay: '', pay_unit: 'hour',
+      dress_code: '', slots: 5, min_rank: 'rookie', status: 'open',
+      skills: '', languages: '', payment_days: 14, terms: state.meta.defaultTerms };
+  }
+
+  mount(view, html`
+    <a class="back" href="${id ? `#/events/${id}` : '#/events'}">${raw(icons.back)} Back</a>
+    <div class="page-head"><h1>${id ? 'Edit event' : 'New event'}</h1></div>
+    <form id="ev-form" class="form form-cols" novalidate>
+      <section class="card form-section">
+        <h2>Basics</h2>
+        <label class="field"><span class="label">Event / campaign title</span>
+          <input name="title" value="${e.title}" placeholder="e.g. Mall Roadshow — Product Sampling" required></label>
+        <label class="field"><span class="label">Job description</span>
+          <textarea name="description" rows="4" placeholder="What will crew do? Briefing time, meals, breaks…">${e.description}</textarea></label>
+        <div class="field-row">
+          <label class="field"><span class="label">Start</span><input type="datetime-local" name="start_at" value="${toLocalInput(e.start_at)}" required></label>
+          <label class="field"><span class="label">End</span><input type="datetime-local" name="end_at" value="${toLocalInput(e.end_at)}" required></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span class="label">Pay (${state.meta.currency})</span>
+            <input type="number" name="pay" min="0" step="0.01" value="${e.pay}" placeholder="0.00" required></label>
+          <label class="field"><span class="label">Paid per</span>
+            <select name="pay_unit">${['hour', 'day', 'shift'].map((u) => html`<option value="${u}" ${e.pay_unit === u ? 'selected' : ''}>${u}</option>`)}</select></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span class="label">Crew needed</span><input type="number" name="slots" min="1" max="1000" value="${e.slots}" required></label>
+          <label class="field"><span class="label">Minimum rank</span>
+            <select name="min_rank">${[...state.meta.ranks].reverse().map((r) =>
+              html`<option value="${r.key}" ${e.min_rank === r.key ? 'selected' : ''}>${r.key === 'rookie' ? 'Anyone (Rookie+)' : `${r.name} and above`}</option>`)}</select></label>
+        </div>
+        <label class="field"><span class="label">Clothing / dress code</span>
+          <textarea name="dress_code" rows="2" placeholder="e.g. Black T-shirt, black jeans, white sneakers">${e.dress_code}</textarea>
+          <span class="presets">${DRESS_PRESETS.map((p) => html`<button type="button" class="preset" data-preset="${p}">+ ${p}</button>`)}</span></label>
+        <label class="field field-inline"><input type="checkbox" name="open" ${e.status === 'open' ? 'checked' : ''}>
+          <span>Open for applications</span></label>
+      </section>
+
+      <section class="card form-section">
+        <h2>Location &amp; check-in area</h2>
+        <label class="field"><span class="label">Location name / address</span>
+          <input name="location_name" value="${e.location_name}" placeholder="e.g. Main Atrium, City Mall" required></label>
+        <div class="search-row">
+          <input id="geo-q" placeholder="Search an address to move the pin…">
+          <button type="button" class="btn btn-ghost" id="geo-go">Search</button>
+          <button type="button" class="btn btn-ghost" id="geo-me">Use my location</button>
+        </div>
+        <div id="geo-results" class="geo-results"></div>
+        <div id="picker" class="map map-tall"></div>
+        <p class="hint" id="pin-hint">${e.lat != null ? '' : 'Click the map to drop a pin where crew should check in.'}</p>
+        <label class="field"><span class="label">Check-in radius: <b id="radius-val">${e.radius_m} m</b></span>
+          <input type="range" name="radius_m" min="50" max="1000" step="10" value="${e.radius_m}">
+          <span class="hint">Crew can only check in when their phone's GPS is inside this circle.</span></label>
+      </section>
+
+      <section class="card form-section">
+        <h2>Who you need</h2>
+        <div class="field"><span class="label">Skills / job type</span>
+          <div class="tag-pick">${SKILL_PRESETS.map((s) => html`<label class="tag-opt"><input type="checkbox" name="skill" value="${s}" ${splitTags(e.skills).includes(s) ? 'checked' : ''}><span>${s}</span></label>`)}</div>
+          <input name="skills_other" value="${splitTags(e.skills).filter((s) => !SKILL_PRESETS.includes(s)).join(', ')}" placeholder="Other skills, comma separated (e.g. Barista, Photography)"></div>
+        <div class="field"><span class="label">Languages they must speak</span>
+          <div class="tag-pick">${LANGUAGE_PRESETS.map((s) => html`<label class="tag-opt"><input type="checkbox" name="language" value="${s}" ${splitTags(e.languages).includes(s) ? 'checked' : ''}><span>${s}</span></label>`)}</div>
+          <input name="languages_other" value="${splitTags(e.languages).filter((s) => !LANGUAGE_PRESETS.includes(s)).join(', ')}" placeholder="Other languages, comma separated">
+          <span class="hint">Leave everything unticked if any language is fine.</span></div>
+      </section>
+
+      <section class="card form-section">
+        <h2>Payment &amp; rules</h2>
+        <label class="field"><span class="label">Payment is made</span>
+          <span class="inline-num"><input type="number" name="payment_days" min="0" max="120" value="${e.payment_days ?? 14}"> days after the event ends</span></label>
+        <label class="field"><span class="label">Terms &amp; conditions (one rule per line)</span>
+          <textarea name="terms" rows="8" placeholder="e.g. Late check-in: RM10 deducted for every 15 minutes late">${e.terms || ''}</textarea></label>
+        <span class="hint">Part-timers must tick “I agree” to these before they can apply. <button type="button" class="link-btn" id="terms-default">Use the default rules</button></span>
+      </section>
+
+      <div class="form-actions">
+        <a class="btn btn-ghost" href="${id ? `#/events/${id}` : '#/events'}">Cancel</a>
+        <button class="btn btn-primary" type="submit">${id ? 'Save changes' : 'Create event'}</button>
+      </div>
+    </form>`);
+
+  const form = $('#ev-form');
+  let coords = e.lat != null ? { lat: e.lat, lng: e.lng } : null;
+  const picker = pickerMap($('#picker'), {
+    lat: e.lat, lng: e.lng, radius: e.radius_m,
+    onChange: (lat, lng) => { coords = { lat, lng }; $('#pin-hint').textContent = `Pinned at ${lat.toFixed(5)}, ${lng.toFixed(5)} — drag the pin to adjust.`; },
+  });
+  form.elements.radius_m.oninput = () => { $('#radius-val').textContent = `${form.elements.radius_m.value} m`; picker.setRadius(Number(form.elements.radius_m.value)); };
+
+  $('#terms-default').onclick = () => { form.elements.terms.value = state.meta.defaultTerms; };
+
+  for (const b of $$('[data-preset]')) {
+    b.onclick = () => {
+      const t = form.elements.dress_code;
+      t.value = t.value.trim() ? `${t.value.trim().replace(/[.,]$/, '')}, ${b.dataset.preset}` : b.dataset.preset;
+    };
+  }
+
+  const search = () => busy($('#geo-go'), async () => {
+    const q = $('#geo-q').value.trim();
+    if (!q) return;
+    const results = await geocode(q);
+    mount($('#geo-results'), results.length
+      ? results.map((r, i) => html`<button type="button" class="geo-hit" data-i="${i}">${r.name}</button>`)
+      : html`<p class="hint">No matches. Try a shorter search or click the map.</p>`);
+    for (const b of $$('.geo-hit')) {
+      b.onclick = () => {
+        const r = results[Number(b.dataset.i)];
+        picker.set(r.lat, r.lng, true);
+        if (!form.elements.location_name.value.trim()) form.elements.location_name.value = r.name.split(',').slice(0, 2).join(',');
+        mount($('#geo-results'), '');
+      };
+    }
+  });
+  $('#geo-go').onclick = search;
+  $('#geo-q').onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); search(); } };
+  $('#geo-me').onclick = () => busy($('#geo-me'), async () => { const p = await getPosition(); picker.set(p.lat, p.lng, true); });
+
+  form.onsubmit = (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(form);
+    const f = Object.fromEntries(fd);
+    f.skills = [...fd.getAll('skill'), ...splitTags(f.skills_other)];
+    f.languages = [...fd.getAll('language'), ...splitTags(f.languages_other)];
+    if (!coords) return toast('Drop a pin on the map for the check-in location.', 'error');
+    const body = {
+      ...f, ...coords,
+      start_at: f.start_at && new Date(f.start_at).toISOString(),
+      end_at: f.end_at && new Date(f.end_at).toISOString(),
+      status: form.elements.open.checked ? 'open' : 'closed',
+    };
+    busy(ev.submitter, async () => {
+      const res = await api(id ? `/api/admin/events/${id}` : '/api/admin/events', { method: id ? 'PUT' : 'POST', body });
+      toast(id ? 'Event updated' : 'Event created — crew can now apply');
+      location.hash = `#/events/${id || res.id}`;
+    });
+  };
+}
+
+// ---------------------------------------------------------------- manage one event
+
+async function eventManage(view, id) {
+  const { event: e, applications } = await api(`/api/admin/events/${id}`);
+  const by = (s) => applications.filter((a) => a.status === s);
+  const pending = by('pending'), crew = by('approved');
+  const others = applications.filter((a) => ['rejected', 'cancelled'].includes(a.status));
+  const ended = new Date(e.end_at) <= new Date();
+  const reload = () => eventManage(view, id);
+
+  const who = (a) => html`
+    <button class="person" data-profile="${a.worker_id}">
+      ${avatar(a.avatar, a.name, 44)}
+      <span class="person-text"><b>${a.name}</b>
+        <span class="person-sub">${a.stats ? rankBadge(a.stats.rank) : ''}
+          ${a.stats?.ratedJobs ? html`${stars(a.stats.avgStars)} <span class="muted">${a.stats.avgStars.toFixed(1)} · ${a.stats.ratedJobs} rated</span>` : html`<span class="muted">No ratings yet</span>`}</span>
+      </span>
+    </button>`;
+
+  const proof = (a, kind) => {
+    const at = a[`${kind}_at`];
+    if (!at) return html`<span class="muted">—</span>`;
+    const flag = kind === 'checkout' && a.checkout_outside;
+    const late = kind === 'checkin' ? lateMinutes(a, e) : 0;
+    return html`<button class="proof" data-proof="${a.id}" data-kind="${kind}">
+      <img src="${a[`${kind}_photo`]}" alt="${kind} photo">
+      <span><b>${fmtTime(at)}${late > 0 ? html` <span class="chip chip-rejected">Late ${late} min</span>` : ''}</b>
+        <small class="${flag ? 'warn' : ''}">${flag ? raw(icons.warn) : ''}${fmtDistance(a[`${kind}_distance`])} from site</small></span>
+    </button>`;
+  };
+
+  const crewRow = (a) => html`
+    <div class="crew-row">
+      ${who(a)}
+      <div class="crew-cell"><span class="cell-label">Check in</span>${proof(a, 'checkin')}</div>
+      <div class="crew-cell"><span class="cell-label">Check out</span>${proof(a, 'checkout')}</div>
+      <div class="crew-cell"><span class="cell-label">Pay</span>
+        ${a.earnings ? html`<b>${money(a.earnings.amount)}</b><small>${a.earnings.hours} h${a.earnings.deduction ? html` · <span class="warn">−${money(a.earnings.deduction)}</span>` : ''}</small>` : html`<span class="muted">—</span>`}
+        ${a.deduction ? html`<small class="warn" title="${a.deduction_reason}">${a.deduction_reason}</small>` : ''}
+        ${a.checkin_at ? html`<button class="link-btn small" data-deduct="${a.id}">${a.deduction ? 'Edit deduction' : 'Deduct pay'}</button>` : ''}</div>
+      <div class="crew-cell crew-actions">
+        ${a.stars != null
+          ? html`<button class="rated" data-rate="${a.id}" title="Edit rating">${stars(a.stars)}<small>${a.stars.toFixed(1)} · edit</small></button>`
+          : a.checkout_at || ended
+            ? html`<button class="btn btn-primary btn-sm" data-rate="${a.id}">Rate</button>`
+            : !a.checkin_at ? html`<button class="btn btn-ghost btn-sm" data-status="${a.id}" data-to="pending">Remove</button>` : html`<span class="chip chip-live">On shift</span>`}
+      </div>
+    </div>`;
+
+  const checkPoints = crew.filter((a) => a.checkin_at).map((a) => ({ lat: a.checkin_lat, lng: a.checkin_lng, label: `${a.name} · in ${fmtTime(a.checkin_at)}` }));
+
+  mount(view, html`
+    <a class="back" href="#/events">${raw(icons.back)} All events</a>
+    <div class="page-head">
+      <div>
+        <h1>${e.title}</h1>
+        <p class="muted">${isLive(e) ? html`<span class="chip chip-live">Live now</span> ` : ''}${statusChip(e.status)} · ${fmtRange(e.start_at, e.end_at)}</p>
+      </div>
+      <div class="row">
+        <a class="btn btn-ghost" href="#/events/${id}/edit">Edit</a>
+        <button class="btn btn-ghost" id="toggle-open">${e.status === 'open' ? 'Close applications' : 'Reopen'}</button>
+        <button class="btn btn-ghost btn-danger-text" id="del">Delete</button>
+      </div>
+    </div>
+
+    <div class="detail-grid">
+      <section class="card">
+        <dl class="facts">
+          <div><dt>${raw(icons.pin)} Where</dt><dd>${e.location_name}<small>Check-in radius ${e.radius_m} m</small></dd></div>
+          <div><dt>${raw(icons.cash)} Pay</dt><dd>${payLabel(e)}</dd></div>
+          <div><dt>${raw(icons.shirt)} Dress code</dt><dd>${e.dress_code || '—'}</dd></div>
+          <div><dt>${raw(icons.users)} Crew</dt><dd>${crew.length} of ${e.slots} filled${e.min_rank !== 'rookie' ? html` · needs ${rankBadge(rankByKey(e.min_rank))}+` : ''}</dd></div>
+        </dl>
+        ${e.description ? html`<p class="desc">${e.description}</p>` : ''}
+        ${e.skills || e.languages ? html`<div class="reqs">
+          ${e.skills ? html`<div><span class="label">Skills</span>${tagChips(e.skills)}</div>` : ''}
+          ${e.languages ? html`<div><span class="label">Languages</span>${tagChips(e.languages)}</div>` : ''}</div>` : ''}
+      </section>
+      <section class="card card-flush"><div id="ev-map" class="map"></div></section>
+    </div>
+    <details class="card terms-card"><summary><b>Payment &amp; rules</b> <span class="muted small">— part-timers agreed to these when applying</span></summary>${termsBlock(e)}</details>
+
+    <h2 class="section-title">Applicants <span class="count">${pending.length}</span></h2>
+    ${pending.length ? html`<div class="card list">${pending.map((a) => html`
+      <div class="list-row">
+        ${who(a)}
+        <div class="app-mid">
+          ${a.note ? html`<p class="note">“${a.note}”</p>` : ''}
+          ${e.languages ? html`<div class="match"><small class="muted">Languages</small>${tagChips(e.languages, a.languages)}</div>` : ''}
+          ${e.skills ? html`<div class="match"><small class="muted">Skills</small>${tagChips(e.skills, `${a.skills || ''} ${a.experience || ''}`)}</div>` : ''}
+          ${!e.languages && !e.skills && !a.note ? html`<small class="muted">${[a.languages, a.skills].filter(Boolean).join(' · ') || ''}</small>` : ''}
+        </div>
+        <div class="row">
+          <button class="btn btn-ghost btn-sm" data-status="${a.id}" data-to="rejected">Decline</button>
+          <button class="btn btn-primary btn-sm" data-status="${a.id}" data-to="approved" ${crew.length >= e.slots ? 'disabled title="All slots filled"' : ''}>Approve</button>
+        </div>
+      </div>`)}</div>` : html`<p class="muted">No applications waiting.</p>`}
+
+    <h2 class="section-title">Crew &amp; attendance <span class="count">${crew.length}/${e.slots}</span></h2>
+    ${crew.length ? html`<div class="card list crew-list">${crew.map(crewRow)}</div>`
+      : html`<p class="muted">Approve applicants to build your crew. Their check-ins will show here with photo and GPS proof.</p>`}
+
+    ${others.length ? html`<details class="others"><summary>Declined &amp; cancelled (${others.length})</summary>
+      <div class="card list">${others.map((a) => html`<div class="list-row">${who(a)}${statusChip(a.status)}
+        ${a.status === 'rejected' ? html`<button class="btn btn-ghost btn-sm" data-status="${a.id}" data-to="pending">Reconsider</button>` : html`<span></span>`}</div>`)}</div>
+    </details>` : ''}`);
+
+  siteMap($('#ev-map'), e, checkPoints);
+
+  $('#toggle-open').onclick = (ev) => busy(ev.currentTarget, async () => {
+    await api(`/api/admin/events/${id}`, { method: 'PUT', body: { ...e, status: e.status === 'open' ? 'closed' : 'open' } });
+    reload();
+  });
+  $('#del').onclick = async () => {
+    if (!(await confirmDialog(`Delete “${e.title}”? All applications, check-ins and ratings for it will be removed.`, 'Delete event', true))) return;
+    await api(`/api/admin/events/${id}`, { method: 'DELETE' });
+    toast('Event deleted');
+    location.hash = '#/events';
+  };
+  for (const b of $$('[data-status]')) {
+    b.onclick = () => busy(b, async () => {
+      await api(`/api/admin/applications/${b.dataset.status}/status`, { method: 'POST', body: { status: b.dataset.to } });
+      reload();
+    });
+  }
+  for (const b of $$('[data-profile]')) b.onclick = () => profileModal(Number(b.dataset.profile));
+  for (const b of $$('[data-proof]')) {
+    b.onclick = () => proofModal(applications.find((a) => a.id === Number(b.dataset.proof)), b.dataset.kind, e);
+  }
+  for (const b of $$('[data-rate]')) {
+    b.onclick = () => rateModal(applications.find((a) => a.id === Number(b.dataset.rate)), reload);
+  }
+  for (const b of $$('[data-deduct]')) {
+    b.onclick = () => deductModal(applications.find((a) => a.id === Number(b.dataset.deduct)), e, reload);
+  }
+}
+
+const DEDUCT_REASONS = ['Late check-in', 'Wrong attire', 'Left post without permission', 'Poor performance', 'Left early'];
+
+function deductModal(a, e, onDone) {
+  const late = lateMinutes(a, e);
+  const m = modal(html`
+    <h2>Deduct pay · ${a.name}</h2>
+    <p class="muted">${a.earnings ? html`Pay before deduction: <b>${money(a.earnings.gross)}</b>. ` : ''}They will see the amount and reason in My shifts.</p>
+    ${late > 0 ? html`<p class="callout callout-warn">Checked in ${late} minutes late.</p>` : ''}
+    <form id="deduct-form" class="form">
+      <label class="field"><span class="label">Amount (${state.meta.currency})</span>
+        <input type="number" name="amount" min="0" step="0.01" value="${a.deduction || ''}" placeholder="0.00" required></label>
+      <label class="field"><span class="label">Reason</span>
+        <input name="reason" value="${a.deduction_reason || ''}" placeholder="e.g. Late 30 minutes">
+        <span class="presets">${DEDUCT_REASONS.map((r) => html`<button type="button" class="preset" data-reason="${r}">${r}</button>`)}</span></label>
+      <div class="row-end">
+        ${a.deduction ? html`<button type="button" class="btn btn-ghost" id="deduct-clear">Remove deduction</button>` : ''}
+        <button class="btn btn-primary" type="submit">Save</button></div>
+    </form>`);
+  const form = $('#deduct-form', m.el);
+  for (const b of $$('[data-reason]', m.el)) {
+    b.onclick = () => { form.elements.reason.value = b.dataset.reason + (b.dataset.reason === 'Late check-in' && late > 0 ? ` (${late} min)` : ''); };
+  }
+  const save = (btn, body) => busy(btn, async () => {
+    await api(`/api/admin/applications/${a.id}/deduct`, { method: 'POST', body });
+    m.close();
+    toast(body.amount > 0 ? 'Deduction saved' : 'Deduction removed');
+    onDone();
+  });
+  $('#deduct-clear', m.el)?.addEventListener('click', (ev) => save(ev.currentTarget, { amount: 0 }));
+  form.onsubmit = (ev) => { ev.preventDefault(); save(ev.submitter, Object.fromEntries(new FormData(form))); };
+}
+
+function proofModal(a, kind, e) {
+  const lat = a[`${kind}_lat`], lng = a[`${kind}_lng`];
+  const m = modal(html`
+    <h2>${a.name} · ${kind === 'checkin' ? 'Check in' : 'Check out'}</h2>
+    <img class="proof-big" src="${a[`${kind}_photo`]}" alt="Proof photo">
+    <dl class="facts facts-compact">
+      <div><dt>Time</dt><dd>${fmtDateTime(a[`${kind}_at`])}</dd></div>
+      <div><dt>Distance from site</dt><dd>${fmtDistance(a[`${kind}_distance`])}
+        ${kind === 'checkout' && a.checkout_outside ? html` <span class="chip chip-rejected">Outside check-in area</span>` : ''}</dd></div>
+      <div><dt>GPS accuracy</dt><dd>${a[`${kind}_accuracy`] ? `± ${Math.round(a[`${kind}_accuracy`])} m` : '—'}</dd></div>
+    </dl>
+    <div id="proof-map" class="map"></div>`, { wide: true });
+  siteMap($('#proof-map', m.el), e, [{ lat, lng, label: `${a.name}` }]);
+}
+
+function rateModal(a, onDone) {
+  const cats = [
+    ['punctuality', 'Punctuality', 'On time, follows the schedule'],
+    ['attitude', 'Attitude', 'Friendly, cooperative, professional'],
+    ['performance', 'Performance', 'Quality of work, initiative'],
+  ];
+  const starInput = (key, current) => html`<span class="star-input" role="radiogroup">
+    ${[5, 4, 3, 2, 1].map((n) => html`<input type="radio" id="${key}-${n}" name="${key}" value="${n}" ${current === n ? 'checked' : ''}><label for="${key}-${n}" title="${n} star${n > 1 ? 's' : ''}">★</label>`)}</span>`;
+
+  const m = modal(html`
+    <h2>Rate ${a.name}</h2>
+    <p class="muted">Ratings decide their rank. Be fair: 3 = did the job, 5 = outstanding.</p>
+    <form id="rate-form" class="form">
+      ${cats.map(([k, label, hint]) => html`<div class="rate-row"><div><b>${label}</b><small>${hint}</small></div>${starInput(k, a[k])}</div>`)}
+      <label class="field"><span class="label">Feedback (they will see this)</span>
+        <textarea name="comment" rows="3" placeholder="What went well? What to improve?">${a.rating_comment || ''}</textarea></label>
+      <button class="btn btn-primary btn-block" type="submit">Save rating</button>
+    </form>`);
+  $('#rate-form', m.el).onsubmit = (ev) => {
+    ev.preventDefault();
+    busy(ev.submitter, async () => {
+      const res = await api(`/api/admin/applications/${a.id}/rate`, { method: 'POST', body: Object.fromEntries(new FormData(ev.target)) });
+      m.close();
+      toast(`Saved. ${a.name} is now ${res.stats.rank.name} (${res.stats.avgStars.toFixed(1)}★ avg)`);
+      onDone();
+    });
+  };
+}
+
+// ---------------------------------------------------------------- crew directory
+
+async function crewList(view) {
+  const { workers } = await api('/api/admin/workers');
+  const ranks = state.meta.ranks;
+  const counts = Object.fromEntries(ranks.map((r) => [r.key, workers.filter((w) => w.stats.rank.key === r.key).length]));
+
+  mount(view, html`
+    <div class="page-head"><div><h1>Crew &amp; ranks</h1><p class="muted">${workers.length} part-timers, best first.</p></div></div>
+    <div class="ladder">${ranks.map((r) => html`
+      <div class="ladder-step ladder-${r.key}">
+        ${rankBadge(r, true)}
+        <b class="ladder-count">${counts[r.key]}</b>
+        <small>${r.minJobs ? `${r.minJobs}+ rated shifts, ${r.minAvg.toFixed(1)}★+ avg` : 'Starting rank'}</small>
+      </div>`)}</div>
+    <div class="toolbar">
+      <input id="q" type="search" placeholder="Search name, city or email">
+      <select id="rank-f"><option value="">All ranks</option>${ranks.map((r) => html`<option value="${r.key}">${r.name}</option>`)}</select>
+    </div>
+    <div class="card list" id="crew"></div>`);
+
+  const draw = () => {
+    const q = $('#q').value.trim().toLowerCase();
+    const rf = $('#rank-f').value;
+    const rows = workers.filter((w) => (!rf || w.stats.rank.key === rf)
+      && (!q || [w.name, w.email, w.city].some((s) => s?.toLowerCase().includes(q))));
+    mount($('#crew'), rows.length ? rows.map((w, i) => html`
+      <a class="list-row crew-dir" href="#/crew/${w.id}">
+        <span class="pos">${i + 1}</span>
+        ${avatar(w.avatar, w.name, 44)}
+        <span class="person-text"><b>${w.name}</b><span class="muted">${w.city || 'Profile not completed'}</span></span>
+        ${rankBadge(w.stats.rank)}
+        <span class="dir-stat">${w.stats.ratedJobs ? html`${stars(w.stats.avgStars)}<small>${w.stats.avgStars.toFixed(1)} avg</small>` : html`<small class="muted">Unrated</small>`}</span>
+        <span class="dir-stat"><b>${w.stats.completed}</b><small>shifts done</small></span>
+      </a>`) : html`<p class="muted pad">Nobody matches.</p>`);
+  };
+  $('#q').oninput = draw;
+  $('#rank-f').onchange = draw;
+  draw();
+}
+
+function profileBody({ user, profile: p, stats, history }) {
+  const age = p?.birth_date ? Math.floor((Date.now() - new Date(p.birth_date)) / 31557600000) : null;
+  const rated = history.filter((h) => h.stars != null);
+  return html`
+    <div class="profile-head">
+      ${avatar(p?.avatar, user.name, 96)}
+      <div>
+        <h1>${user.name}</h1>
+        <p>${rankBadge(stats.rank, true)}</p>
+        <p class="muted">${stats.ratedJobs ? html`${stars(stats.avgStars)} ${stats.avgStars.toFixed(2)} avg from ${stats.ratedJobs} rated shifts · ` : ''}${stats.completed} shifts completed</p>
+      </div>
+    </div>
+    ${!p ? html`<p class="muted">This part-timer has not filled in their profile yet.</p>` : html`
+    <dl class="facts facts-2">
+      <div><dt>Phone</dt><dd><a href="tel:${p.phone}">${p.phone}</a></dd></div>
+      <div><dt>Email</dt><dd><a href="mailto:${user.email}">${user.email}</a></dd></div>
+      <div><dt>City / area</dt><dd>${p.city || '—'}</dd></div>
+      <div><dt>Age · Gender · Height</dt><dd>${[age && `${age} yrs`, p.gender, p.height_cm && `${p.height_cm} cm`].filter(Boolean).join(' · ') || '—'}</dd></div>
+      <div><dt>Languages</dt><dd>${p.languages || '—'}</dd></div>
+      <div><dt>Skills</dt><dd>${p.skills || '—'}</dd></div>
+    </dl>
+    ${p.experience ? html`<h3>Experience</h3><p class="desc">${p.experience}</p>` : ''}
+    ${p.about ? html`<h3>About</h3><p class="desc">${p.about}</p>` : ''}
+    ${p.resume ? html`<p><a class="btn btn-ghost" href="${p.resume}" target="_blank" rel="noopener">${raw(icons.file)} Open resume (${p.resume_name})</a></p>` : ''}`}
+    <h3>Feedback history</h3>
+    ${rated.length ? html`<div class="feedback">${rated.map((h) => html`
+      <div class="fb"><div class="fb-head"><b>${h.title}</b><span class="muted">${fmtDate(h.start_at)}</span></div>
+        <div>${stars(h.stars)} <small class="muted">Punctuality ${h.punctuality} · Attitude ${h.attitude} · Performance ${h.performance}</small></div>
+        ${h.comment ? html`<p>${h.comment}</p>` : ''}</div>`)}</div>` : html`<p class="muted">No ratings yet.</p>`}`;
+}
+
+async function profileModal(workerId) {
+  const data = await api(`/api/admin/workers/${workerId}`);
+  const m = modal(html`${profileBody(data)}<p><a href="#/crew/${workerId}" class="link">Open full page →</a></p>`, { wide: true });
+  $('a.link', m.el).addEventListener('click', () => m.close());
+}
+
+async function crewDetail(view, workerId) {
+  const data = await api(`/api/admin/workers/${workerId}`);
+  mount(view, html`<a class="back" href="#/crew">${raw(icons.back)} Crew</a><section class="card">${profileBody(data)}</section>`);
+}
+

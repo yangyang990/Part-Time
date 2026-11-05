@@ -1,0 +1,18 @@
+{
+  "name": "shiftcrew",
+  "version": "1.0.0",
+  "description": "Part-timer management: organisers post events, crew apply, check in/out with GPS + photo proof, and get ranked.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node seed.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
