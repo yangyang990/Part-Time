@@ -2,7 +2,9 @@ import {
   state, api, html, raw, mount, $, $$, busy, toast, modal, confirmDialog, icons,
   fmtRange, fmtDateTime, fmtTime, fmtDate, payLabel, money, fmtDistance, toLocalInput, relTime,
   rankBadge, rankByKey, stars, avatar, statusChip, empty, tagChips, termsBlock, lateMinutes,
+  taskDueLabel, taskDueAt, taskLate,
 } from './ui.js';
+import { chatPage } from './chat.js';
 import { siteMap, pickerMap, geocode } from './map.js';
 import { getPosition } from './ui.js';
 
@@ -12,6 +14,7 @@ export async function route(path, view) {
   if (path === '/events/new') return eventForm(view);
   if ((m = path.match(/^\/events\/(\d+)\/edit$/))) return eventForm(view, Number(m[1]));
   if ((m = path.match(/^\/events\/(\d+)$/))) return eventManage(view, Number(m[1]));
+  if ((m = path.match(/^\/events\/(\d+)\/chat$/))) return chatPage(view, Number(m[1]), `#/events/${m[1]}`, 'Back to event');
   if (path === '/crew') return crewList(view);
   if ((m = path.match(/^\/crew\/(\d+)$/))) return crewDetail(view, Number(m[1]));
   location.replace('#/events');
@@ -249,7 +252,7 @@ async function eventForm(view, id) {
 // ---------------------------------------------------------------- manage one event
 
 async function eventManage(view, id) {
-  const { event: e, applications } = await api(`/api/admin/events/${id}`);
+  const { event: e, applications, tasks, submissions, messageCount } = await api(`/api/admin/events/${id}`);
   const by = (s) => applications.filter((a) => a.status === s);
   const pending = by('pending'), crew = by('approved');
   const others = applications.filter((a) => ['rejected', 'cancelled'].includes(a.status));
@@ -303,6 +306,31 @@ async function eventManage(view, id) {
       </div>
     </div>`;
 
+  const taskRow = (t) => {
+    const subs = submissions.filter((s) => s.task_id === t.id && crew.some((a) => a.id === s.application_id));
+    const waiting = crew.filter((a) => !subs.some((s) => s.application_id === a.id));
+    const due = taskDueAt(t, e);
+    const overdue = due && due < new Date() && waiting.some((a) => a.checkin_at);
+    return html`<div class="task-row">
+      <div class="task-info"><b>${t.title}</b>
+        <small class="${overdue ? 'warn' : 'muted'}">${raw(icons.clock)} ${taskDueLabel(t, e)}${overdue ? ' · overdue' : ''}</small>
+        ${t.instructions ? html`<small class="task-instr">${t.instructions}</small>` : ''}</div>
+      <div class="task-shots">
+        <span class="chip ${crew.length && !waiting.length ? 'chip-approved' : ''}">${subs.length}/${crew.length} done</span>
+        ${subs.map((s) => {
+          const a = crew.find((x) => x.id === s.application_id);
+          return html`<button class="shot ${taskLate(t, e, s) ? 'shot-late' : ''}" data-shot="${s.id}" title="${a.name} · ${fmtTime(s.created_at)}">
+            <img src="${s.photo}" alt="${a.name}"><span>${a.name.split(' ')[0]}</span></button>`;
+        })}
+        ${waiting.length && crew.length ? html`<small class="muted task-waiting">Waiting for ${waiting.map((a) => a.name.split(' ')[0]).join(', ')}</small>` : ''}
+      </div>
+      <div class="row task-actions">
+        <button class="btn btn-ghost btn-sm" data-edit-task="${t.id}">Edit</button>
+        <button class="btn btn-ghost btn-sm btn-danger-text" data-del-task="${t.id}">Delete</button>
+      </div>
+    </div>`;
+  };
+
   const checkPoints = crew.filter((a) => a.checkin_at).map((a) => ({ lat: a.checkin_lat, lng: a.checkin_lng, label: `${a.name} · in ${fmtTime(a.checkin_at)}` }));
 
   mount(view, html`
@@ -313,6 +341,7 @@ async function eventManage(view, id) {
         <p class="muted">${isLive(e) ? html`<span class="chip chip-live">Live now</span> ` : ''}${statusChip(e.status)} · ${fmtRange(e.start_at, e.end_at)}</p>
       </div>
       <div class="row">
+        <a class="btn btn-primary" href="#/events/${id}/chat">${raw(icons.chat)} Group chat${messageCount ? html` <span class="count">${messageCount}</span>` : ''}</a>
         <a class="btn btn-ghost" href="#/events/${id}/edit">Edit</a>
         <button class="btn btn-ghost" id="toggle-open">${e.status === 'open' ? 'Close applications' : 'Reopen'}</button>
         <button class="btn btn-ghost btn-danger-text" id="del">Delete</button>
@@ -357,6 +386,14 @@ async function eventManage(view, id) {
     ${crew.length ? html`<div class="card list crew-list">${crew.map(crewRow)}</div>`
       : html`<p class="muted">Approve applicants to build your crew. Their check-ins will show here with photo and GPS proof.</p>`}
 
+    <h2 class="section-title">Photo tasks <span class="count">${tasks.length}</span>
+      <button class="btn btn-ghost btn-sm push" id="add-task">${raw(icons.plus)} Add task</button></h2>
+    ${tasks.length ? html`<div class="card list">${tasks.map(taskRow)}</div>`
+      : html`<div class="card task-empty">
+          <p class="muted">Ask the crew for photo updates during the shift, e.g. a selfie at their post 30 minutes in, or a photo with the store. They see these tasks after they check in.</p>
+          <div class="tag-pick">${TASK_PRESETS.map((p, i) => html`<button type="button" class="btn btn-ghost btn-sm" data-preset-task="${i}">+ ${p.title}</button>`)}</div>
+        </div>`}
+
     ${others.length ? html`<details class="others"><summary>Declined &amp; cancelled (${others.length})</summary>
       <div class="card list">${others.map((a) => html`<div class="list-row">${who(a)}${statusChip(a.status)}
         ${a.status === 'rejected' ? html`<button class="btn btn-ghost btn-sm" data-status="${a.id}" data-to="pending">Reconsider</button>` : html`<span></span>`}</div>`)}</div>
@@ -390,6 +427,93 @@ async function eventManage(view, id) {
   for (const b of $$('[data-deduct]')) {
     b.onclick = () => deductModal(applications.find((a) => a.id === Number(b.dataset.deduct)), e, reload);
   }
+
+  $('#add-task').onclick = () => taskModal(e, null, reload);
+  for (const b of $$('[data-preset-task]')) b.onclick = () => taskModal(e, TASK_PRESETS[Number(b.dataset.presetTask)], reload);
+  for (const b of $$('[data-edit-task]')) b.onclick = () => taskModal(e, tasks.find((t) => t.id === Number(b.dataset.editTask)), reload);
+  for (const b of $$('[data-del-task]')) {
+    b.onclick = async () => {
+      const t = tasks.find((x) => x.id === Number(b.dataset.delTask));
+      if (!(await confirmDialog(`Delete the task “${t.title}”? Photos the crew sent for it are removed too.`, 'Delete task', true))) return;
+      await busy(b, () => api(`/api/admin/tasks/${t.id}`, { method: 'DELETE' }));
+      reload();
+    };
+  }
+  for (const b of $$('[data-shot]')) {
+    b.onclick = () => {
+      const s = submissions.find((x) => x.id === Number(b.dataset.shot));
+      shotModal(s, tasks.find((t) => t.id === s.task_id), crew.find((a) => a.id === s.application_id), e);
+    };
+  }
+}
+
+// ---------------------------------------------------------------- photo tasks
+
+const TASK_PRESETS = [
+  { title: 'Selfie at your post', due_min: 30, instructions: 'Take a selfie at your post so we can see you are set up and ready.' },
+  { title: 'Photo with the store / booth', due_min: 60, instructions: 'Take a photo of yourself with the store front or booth clearly in the background.' },
+  { title: 'Photo with your teammate', due_min: null, instructions: 'Take a photo with another part-timer working this event.' },
+  { title: 'Booth / display ready', due_min: 15, instructions: 'Show the booth or display fully set up before customers arrive.' },
+  { title: 'Crowd / activity update', due_min: null, instructions: 'Show what is happening at your area right now.' },
+];
+
+function taskModal(e, t, onDone) {
+  const editing = !!t?.id;
+  const timed = t ? t.due_min != null : true;
+  const m = modal(html`
+    <h2>${editing ? 'Edit photo task' : 'New photo task'}</h2>
+    <p class="muted">Crew see this on their shift after they check in, and send a photo for it.</p>
+    ${editing ? '' : html`<div class="tag-pick task-presets">${TASK_PRESETS.map((p, i) => html`<button type="button" class="btn btn-ghost btn-sm" data-p="${i}">${p.title}</button>`)}</div>`}
+    <form id="task-form" class="form">
+      <label class="field"><span class="label">Task</span>
+        <input name="title" maxlength="120" required value="${t?.title || ''}" placeholder="e.g. Selfie at your post"></label>
+      <label class="field"><span class="label">Instructions <small class="muted">(optional)</small></span>
+        <textarea name="instructions" rows="3" maxlength="1000" placeholder="What should the photo show?">${t?.instructions || ''}</textarea></label>
+      <div class="field"><span class="label">When</span>
+        <label class="radio"><input type="radio" name="when" value="timed" ${timed ? 'checked' : ''}>
+          <span class="inline-num">Within the first <input type="number" name="due_min" min="0" max="1440" step="5" value="${t?.due_min ?? 30}"> minutes of the start</span></label>
+        <label class="radio"><input type="radio" name="when" value="any" ${timed ? '' : 'checked'}> Any time during the shift</label>
+        <span class="hint">Event starts ${fmtDateTime(e.start_at)}.</span>
+      </div>
+      <button class="btn btn-primary btn-block" type="submit">${editing ? 'Save task' : 'Add task'}</button>
+    </form>`);
+  const f = $('#task-form', m.el);
+  for (const b of $$('[data-p]', m.el)) {
+    b.onclick = () => {
+      const p = TASK_PRESETS[Number(b.dataset.p)];
+      f.elements.title.value = p.title;
+      f.elements.instructions.value = p.instructions;
+      f.elements.when.value = p.due_min == null ? 'any' : 'timed';
+      if (p.due_min != null) f.elements.due_min.value = p.due_min;
+    };
+  }
+  f.elements.due_min.onfocus = () => { f.elements.when.value = 'timed'; };
+  f.onsubmit = (ev) => {
+    ev.preventDefault();
+    const body = {
+      title: f.elements.title.value,
+      instructions: f.elements.instructions.value,
+      due_min: f.elements.when.value === 'any' ? null : f.elements.due_min.value,
+    };
+    busy(ev.submitter, async () => {
+      await api(editing ? `/api/admin/tasks/${t.id}` : `/api/admin/events/${e.id}/tasks`, { method: editing ? 'PUT' : 'POST', body });
+      m.close();
+      toast(editing ? 'Task updated' : 'Task added — crew will see it after checking in');
+      onDone();
+    });
+  };
+}
+
+function shotModal(s, t, a, e) {
+  const late = taskLate(t, e, s);
+  modal(html`
+    <h2>${t.title}</h2>
+    <p class="muted">${a.name} · sent ${fmtDateTime(s.created_at)}
+      ${late ? html` <span class="chip chip-rejected">After the deadline</span>` : t.due_min != null ? html` <span class="chip chip-approved">On time</span>` : ''}</p>
+    <img class="proof-big" src="${s.photo}" alt="Photo from ${a.name}">
+    ${s.note ? html`<p class="note">“${s.note}”</p>` : ''}
+    <p class="small muted">${s.distance != null ? `${fmtDistance(s.distance)} from ${e.location_name}` : 'No location was shared with this photo.'}
+      · ${taskDueLabel(t, e)}</p>`, { wide: true });
 }
 
 const DEDUCT_REASONS = ['Late check-in', 'Wrong attire', 'Left post without permission', 'Poor performance', 'Left early'];

@@ -337,8 +337,17 @@ app.get('/api/my/shifts', need('worker'), route(async (req) => {
     LEFT JOIN ratings r ON r.application_id = a.id
     WHERE a.worker_id = ?
     ORDER BY e.start_at DESC`, req.user.id);
+  // Photo tasks for the shifts this person is approved on, with what they already sent.
+  const eventIds = [...new Set(rows.filter((r) => r.status === 'approved').map((r) => r.event_id))];
+  const tasks = eventIds.length
+    ? await db.all(`SELECT * FROM event_tasks WHERE event_id IN (${eventIds.map(() => '?').join(',')})
+                    ORDER BY COALESCE(due_min, 100000), position, id`, ...eventIds)
+    : [];
+  const subs = await db.all('SELECT * FROM task_submissions WHERE worker_id = ?', req.user.id);
+  const withTasks = (r) => (r.status !== 'approved' ? [] : tasks.filter((t) => t.event_id === r.event_id)
+    .map((t) => ({ ...t, submission: subs.find((s) => s.task_id === t.id && s.application_id === r.id) || null })));
   return {
-    shifts: rows.map((r) => ({ ...r, earnings: shiftEarnings(r, r) })),
+    shifts: rows.map((r) => ({ ...r, earnings: shiftEarnings(r, r), tasks: withTasks(r) })),
     feedback: await db.all(`
       SELECT r.*, e.title FROM ratings r JOIN applications a ON a.id = r.application_id
       JOIN events e ON e.id = a.event_id WHERE r.worker_id = ? ORDER BY r.created_at DESC LIMIT 20`, req.user.id),
@@ -391,6 +400,83 @@ app.post('/api/applications/:id/checkout', need('worker'), route(async (req) => 
                 checkout_distance = ?, checkout_photo = ?, checkout_outside = ?, updated_at = ? WHERE id = ?`,
   nowIso(), fix.lat, fix.lng, fix.accuracy, dist, photo, outside, nowIso(), app.id);
   return { ok: true, distance: dist, outside: !!outside };
+}));
+
+// Send the photo for one of the event's tasks. Sending again replaces the earlier photo.
+app.post('/api/applications/:id/tasks/:taskId', need('worker'), route(async (req) => {
+  const app = await ownApplication(req);
+  if (app.status !== 'approved') fail(400, 'You are not approved for this shift.');
+  if (!app.checkin_at) fail(400, 'Check in first, then do your tasks.');
+  if (app.checkout_at) fail(400, 'You have already checked out of this shift.');
+  const task = await db.get('SELECT * FROM event_tasks WHERE id = ? AND event_id = ?', req.params.taskId, app.event_id);
+  if (!task) fail(404, 'Task not found.');
+  if (!req.body.photo) fail(400, 'Please take a photo.');
+  // Location is optional here (a missing GPS fix should not block a photo update), but recorded when given.
+  const hasFix = req.body.lat != null && req.body.lng != null
+    && Number.isFinite(Number(req.body.lat)) && Number.isFinite(Number(req.body.lng));
+  const lat = hasFix ? Number(req.body.lat) : null;
+  const lng = hasFix ? Number(req.body.lng) : null;
+  const photo = await saveDataUrl(req.user.id, req.body.photo, IMAGE_TYPES, 3 * 1024 * 1024);
+  await db.run(`
+    INSERT INTO task_submissions (task_id, application_id, worker_id, photo, note, lat, lng, distance, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (task_id, application_id) DO UPDATE SET photo = excluded.photo, note = excluded.note,
+      lat = excluded.lat, lng = excluded.lng, distance = excluded.distance, created_at = excluded.created_at`,
+  task.id, app.id, req.user.id, photo, text(req.body.note, 300) || null,
+  lat, lng, hasFix ? distanceMeters(lat, lng, app.lat, app.lng) : null, nowIso());
+  return { ok: true };
+}));
+
+// ---------- event group chat (organiser + approved crew) ----------
+
+async function chatEvent(req) {
+  const event = await db.get('SELECT id, title, admin_id, start_at, end_at, location_name FROM events WHERE id = ?', req.params.id);
+  if (!event) fail(404, 'Event not found.');
+  if (event.admin_id !== req.user.id) {
+    const member = await db.get("SELECT 1 FROM applications WHERE event_id = ? AND worker_id = ? AND status = 'approved'",
+      event.id, req.user.id);
+    if (!member) fail(403, 'Only the organiser and approved crew can see this group.');
+  }
+  return event;
+}
+
+app.get('/api/events/:id/chat', need(), route(async (req) => {
+  const event = await chatEvent(req);
+  const after = int(req.query.after) || 0;
+  const messages = (await db.all(`
+    SELECT m.id, m.user_id, m.body, m.photo, m.created_at, u.name
+    FROM messages m JOIN users u ON u.id = m.user_id
+    WHERE m.event_id = ? AND m.id > ? ORDER BY m.id DESC LIMIT 200`, event.id, after)).reverse()
+    // Chat pictures are served through the chat (members only), not the owner-only /files link.
+    .map((m) => ({ ...m, photo: m.photo ? `/api/events/${event.id}/chat/photos/${m.id}` : null }));
+  const out = { messages, me: req.user.id, organiserId: event.admin_id };
+  if (!after) {
+    out.event = event;
+    const organiser = await db.get('SELECT id, name FROM users WHERE id = ?', event.admin_id);
+    const crew = await db.all(`
+      SELECT u.id, u.name, a.chosen_roles FROM applications a JOIN users u ON u.id = a.worker_id
+      WHERE a.event_id = ? AND a.status = 'approved' ORDER BY u.name`, event.id);
+    out.members = [{ ...organiser, organiser: true }, ...crew];
+  }
+  return out;
+}));
+
+app.post('/api/events/:id/chat', need(), route(async (req) => {
+  const event = await chatEvent(req);
+  const body = text(req.body.body, 1000);
+  if (!body && !req.body.photo) fail(400, 'Type a message or add a photo first.');
+  const photo = req.body.photo ? await saveDataUrl(req.user.id, req.body.photo, IMAGE_TYPES, 3 * 1024 * 1024) : null;
+  const { lastInsertRowid } = await db.run('INSERT INTO messages (event_id, user_id, body, photo, created_at) VALUES (?, ?, ?, ?, ?)',
+    event.id, req.user.id, body, photo, nowIso());
+  return { ok: true, id: lastInsertRowid };
+}));
+
+// A picture posted in the chat: visible to the event's organiser and approved crew only.
+app.get('/api/events/:id/chat/photos/:msgId', need(), route(async (req, res) => {
+  const event = await chatEvent(req);
+  const msg = await db.get('SELECT user_id, photo FROM messages WHERE id = ? AND event_id = ?', req.params.msgId, event.id);
+  const m = msg?.photo?.match(/^\/files\/(\d+)\/([\w-]+\.\w+)$/);
+  if (!m || !(await sendStoredFile(res, m[1], m[2]))) fail(404, 'Photo not found.');
 }));
 
 // ---------- organiser: events ----------
@@ -489,6 +575,9 @@ app.delete('/api/admin/events/:id', need('admin'), route(async (req) => {
   // Delete children explicitly (the hosted database may not enforce ON DELETE CASCADE).
   await db.batch([
     ['DELETE FROM ratings WHERE application_id IN (SELECT id FROM applications WHERE event_id = ?)', event.id],
+    ['DELETE FROM task_submissions WHERE task_id IN (SELECT id FROM event_tasks WHERE event_id = ?)', event.id],
+    ['DELETE FROM event_tasks WHERE event_id = ?', event.id],
+    ['DELETE FROM messages WHERE event_id = ?', event.id],
     ['DELETE FROM applications WHERE event_id = ?', event.id],
     ['DELETE FROM events WHERE id = ?', event.id],
   ]);
@@ -509,7 +598,62 @@ app.get('/api/admin/events/:id', need('admin'), route(async (req) => {
   return {
     event,
     applications: apps.map((a) => ({ ...a, stats: stats.get(a.worker_id), earnings: shiftEarnings(event, a) })),
+    tasks: await eventTasks(event.id),
+    submissions: await db.all(`
+      SELECT s.* FROM task_submissions s JOIN event_tasks t ON t.id = s.task_id WHERE t.event_id = ?`, event.id),
+    messageCount: (await db.get('SELECT COUNT(*) AS n FROM messages WHERE event_id = ?', event.id)).n,
   };
+}));
+
+// ---------- organiser: photo tasks ----------
+
+function eventTasks(eventId) {
+  return db.all('SELECT * FROM event_tasks WHERE event_id = ? ORDER BY COALESCE(due_min, 100000), position, id', eventId);
+}
+
+function readTask(b) {
+  const t = {
+    title: text(b.title, 120),
+    instructions: text(b.instructions, 1000) || null,
+    due_min: b.due_min === '' || b.due_min === null || b.due_min === undefined ? null : int(b.due_min),
+  };
+  if (!t.title) fail(400, 'Give the task a name.');
+  if (t.due_min !== null && !(t.due_min >= 0 && t.due_min <= 1440)) fail(400, 'Due time must be 0 to 1440 minutes after the start.');
+  return t;
+}
+
+async function ownTask(req) {
+  const task = await db.get('SELECT * FROM event_tasks WHERE id = ?', req.params.id);
+  if (!task) fail(404, 'Task not found.');
+  await ownEvent(req, task.event_id);
+  return task;
+}
+
+app.post('/api/admin/events/:id/tasks', need('admin'), route(async (req) => {
+  const event = await ownEvent(req);
+  const t = readTask(req.body);
+  const { n } = await db.get('SELECT COUNT(*) AS n FROM event_tasks WHERE event_id = ?', event.id);
+  if (n >= 20) fail(400, 'An event can have up to 20 tasks.');
+  const { lastInsertRowid } = await db.run(
+    'INSERT INTO event_tasks (event_id, title, instructions, due_min, position, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    event.id, t.title, t.instructions, t.due_min, n, nowIso());
+  return { ok: true, id: lastInsertRowid };
+}));
+
+app.put('/api/admin/tasks/:id', need('admin'), route(async (req) => {
+  const task = await ownTask(req);
+  const t = readTask(req.body);
+  await db.run('UPDATE event_tasks SET title = ?, instructions = ?, due_min = ? WHERE id = ?', t.title, t.instructions, t.due_min, task.id);
+  return { ok: true };
+}));
+
+app.delete('/api/admin/tasks/:id', need('admin'), route(async (req) => {
+  const task = await ownTask(req);
+  await db.batch([
+    ['DELETE FROM task_submissions WHERE task_id = ?', task.id],
+    ['DELETE FROM event_tasks WHERE id = ?', task.id],
+  ]);
+  return { ok: true };
 }));
 
 async function appForAdmin(req) {

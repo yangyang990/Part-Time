@@ -3,13 +3,17 @@ import {
   fmtRange, fmtDateTime, fmtTime, fmtDate, payLabel, money, fmtDistance, relTime,
   rankBadge, rankByKey, stars, avatar, statusChip, empty,
   fileToDataUrl, compressImage, getPosition, distanceMeters, tagChips, termsBlock, payDueDate, splitTags, tagMatches,
+  taskDueLabel, taskDueAt, taskLate,
 } from './ui.js';
+import { chatPage } from './chat.js';
 import { siteMap } from './map.js';
 import { refreshMe, render } from './main.js';
 
 export async function route(path, view) {
   if (path === '/' || path === '/jobs') return jobs(view);
   if (path === '/shifts') return shifts(view);
+  const chat = path.match(/^\/shifts\/chat\/(\d+)$/);
+  if (chat) return chatPage(view, Number(chat[1]), '#/shifts', 'My shifts');
   if (path === '/rank') return rank(view);
   if (path === '/profile') return profile(view);
   location.replace('#/jobs');
@@ -148,7 +152,29 @@ async function shifts(view) {
         ${s.dress_code ? html`<span>${raw(icons.shirt)}${s.dress_code}</span>` : ''}
       </div>
       <button class="link-btn small" data-terms="${s.id}">View payment &amp; rules</button>
-      <div class="shift-action">${action}</div>
+      ${s.tasks.length ? taskList(s) : ''}
+      <div class="shift-action">${action}
+        <a class="btn btn-ghost btn-block" href="#/shifts/chat/${s.event_id}">${raw(icons.chat)} Group chat</a></div>
+    </div>`;
+  };
+
+  const taskList = (s) => {
+    const done = s.tasks.filter((t) => t.submission).length;
+    return html`<div class="tasks">
+      <div class="tasks-head"><b>${raw(icons.task)} Photo tasks</b><small class="muted">${done}/${s.tasks.length} done</small></div>
+      ${s.tasks.map((t) => {
+        const sub = t.submission;
+        const due = taskDueAt(t, s);
+        const overdue = !sub && due && due < now;
+        return html`<div class="task ${sub ? 'task-done' : ''}">
+          ${sub ? html`<img class="task-thumb" src="${sub.photo}" alt="">` : html`<span class="task-dot"></span>`}
+          <span class="task-text"><b>${t.title}</b>
+            <small class="${overdue ? 'warn' : 'muted'}">${sub ? `Sent ${fmtTime(sub.created_at)}${taskLate(t, s, sub) ? ' (late)' : ''}` : `${taskDueLabel(t, s)}${overdue ? ' · overdue' : ''}`}</small>
+            ${t.instructions && !sub ? html`<small>${t.instructions}</small>` : ''}</span>
+          ${s.checkin_at ? html`<button class="btn ${sub ? 'btn-ghost' : 'btn-primary'} btn-sm" data-task="${s.id}:${t.id}">${sub ? 'Retake' : html`${raw(icons.camera)} Photo`}</button>`
+            : html`<small class="muted">After check-in</small>`}
+        </div>`;
+      })}
     </div>`;
   };
 
@@ -178,6 +204,13 @@ async function shifts(view) {
   for (const b of $$('[data-terms]')) {
     b.onclick = () => { const s = all.find((x) => x.id === Number(b.dataset.terms)); modal(html`<h2>${s.title}</h2><h3 class="terms-title">Payment &amp; rules</h3>${termsBlock(s)}`); };
   }
+  for (const b of $$('[data-task]')) {
+    b.onclick = () => {
+      const [sid, tid] = b.dataset.task.split(':').map(Number);
+      const s = all.find((x) => x.id === sid);
+      taskFlow(s, s.tasks.find((t) => t.id === tid), reload);
+    };
+  }
   for (const b of $$('[data-in]')) b.onclick = () => proofFlow(all.find((s) => s.id === Number(b.dataset.in)), 'checkin', reload);
   for (const b of $$('[data-out]')) b.onclick = () => proofFlow(all.find((s) => s.id === Number(b.dataset.out)), 'checkout', reload);
   for (const b of $$('[data-cancel]')) {
@@ -187,6 +220,44 @@ async function shifts(view) {
       reload();
     };
   }
+}
+
+/** Photo for one of the organiser's tasks. Location is attached when available but never required. */
+function taskFlow(s, t, onDone) {
+  let photo = null;
+  let fix = null;
+  const m = modal(html`
+    <h2>${t.title}</h2>
+    <p class="muted">${t.instructions || 'Take a photo for the organiser.'}</p>
+    <p class="small ${taskDueAt(t, s) && taskDueAt(t, s) < new Date() && !t.submission ? 'warn' : 'muted'}">${raw(icons.clock)} ${taskDueLabel(t, s)}</p>
+    <label class="photo-drop" id="task-drop">
+      <input type="file" accept="image/*" capture="environment" id="task-in" hidden>
+      <span class="photo-ph">${raw(icons.camera)}<b>Take photo</b><small>Tap to open camera</small></span>
+    </label>
+    <label class="field task-note"><span class="label">Note <small class="muted">(optional)</small></span>
+      <input name="note" maxlength="300" placeholder="e.g. Booth B, near the entrance"></label>
+    <button class="btn btn-primary btn-lg btn-block" id="task-send" disabled>Send to organiser</button>`);
+  const send = $('#task-send', m.el);
+  m.el.addEventListener('change', async (ev) => {
+    if (ev.target.id !== 'task-in') return;
+    const file = ev.target.files[0];
+    if (!file) return;
+    try {
+      photo = await compressImage(file);
+      mount($('#task-drop', m.el), html`<input type="file" accept="image/*" capture="environment" id="task-in" hidden>
+        <img src="${photo}" alt="Your photo"><span class="retake">Retake</span>`);
+      send.disabled = false;
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  getPosition().then((p) => { fix = p; }).catch(() => {});
+  send.onclick = () => busy(send, async () => {
+    await api(`/api/applications/${s.id}/tasks/${t.id}`, {
+      method: 'POST', body: { photo, note: $('input[name=note]', m.el).value, lat: fix?.lat ?? null, lng: fix?.lng ?? null },
+    });
+    m.close();
+    toast('Photo sent to the organiser');
+    onDone();
+  });
 }
 
 /** Selfie + GPS proof for check-in or check-out. */

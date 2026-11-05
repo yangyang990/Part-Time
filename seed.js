@@ -40,13 +40,21 @@ admin, e.title, e.description ?? null, e.location, LAT + (e.dLat || 0), LNG + (e
 e.start, e.end, e.pay, e.unit, e.dress, e.slots, e.minRank || 'rookie', e.status || 'open',
 e.skills ?? null, e.languages ?? null, 14, DEFAULT_TERMS, nowIso())).lastInsertRowid;
 
-await event({
+const roadshow = await event({
   title: 'Mall Roadshow — Product Sampling',
   description: 'Hand out samples and invite shoppers to the booth. Briefing 15 minutes before start.',
   location: 'Main Atrium, City Mall', start: at(-0.5 * hour), end: at(6 * hour),
   pay: 12, unit: 'hour', dress: 'Black T-shirt, black jeans, white sneakers. Name tag provided.', slots: 4,
   skills: 'Promotion, Product sampling, Sales', languages: 'Malay, Chinese (Mandarin)',
 });
+for (const [i, [title, due, instructions]] of [
+  ['Selfie at your post', 30, 'Take a selfie at your post so we can see you are set up and ready.'],
+  ['Photo with the booth', 60, 'Show yourself with the booth clearly in the background.'],
+  ['Photo with your teammate', null, 'Take a photo with another part-timer working this event.'],
+].entries()) {
+  await db.run('INSERT INTO event_tasks (event_id, title, instructions, due_min, position, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    roadshow, title, instructions, due, i, nowIso());
+}
 await event({
   title: 'Music Festival Ushers',
   description: 'Ticket scanning and crowd guidance at gates. Dinner provided.',

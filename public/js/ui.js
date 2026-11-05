@@ -124,6 +124,9 @@ export const icons = {
   plus: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
   back: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
   file: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>',
+  image: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></svg>',
+  task: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>',
 };
 
@@ -240,5 +243,18 @@ export function termsBlock(e) {
     ${rules.length ? html`<ol class="terms-rules">${rules.map((r) => html`<li>${r}</li>`)}</ol>` : html`<p class="muted small">No extra rules for this event.</p>`}
   </div>`;
 }
+
+// ---- photo tasks ----
+/** When a task is due (Date), or null if it can be done any time during the shift. */
+export const taskDueAt = (t, e) => (t.due_min == null ? null : new Date(new Date(e.start_at).getTime() + t.due_min * 6e4));
+export function taskDueLabel(t, e) {
+  if (t.due_min == null) return 'Any time during the shift';
+  const at = fmtTime(taskDueAt(t, e).toISOString());
+  if (t.due_min === 0) return `At the start (${at})`;
+  const span = t.due_min % 60 === 0 ? `${t.due_min / 60} h` : `${t.due_min} min`;
+  return `Within the first ${span} · by ${at}`;
+}
+/** Was this submission sent after the task's deadline? */
+export const taskLate = (t, e, s) => !!(s && t.due_min != null && new Date(s.created_at) > taskDueAt(t, e));
 
 export const lateMinutes = (a, e) => (a.checkin_at ? Math.round((new Date(a.checkin_at) - new Date(e.start_at)) / 6e4) : 0);
