@@ -81,7 +81,7 @@ and photos/resumes live in **Vercel Blob**. Locally nothing changes.
 
 ### 3. Add photo storage
 
-1. In the Vercel project → **Storage** → **Create** → **Blob** → connect it to this project.
+1. In the Vercel project → **Storage** → **Create** → **Blob** (Access: **Private**) → connect it to this project.
    This adds `BLOB_READ_WRITE_TOKEN` automatically.
 2. **Deployments** → latest → **⋯ → Redeploy** so the new variable is picked up.
 
@@ -99,8 +99,8 @@ TURSO_DATABASE_URL=libsql://… TURSO_AUTH_TOKEN=… npm run seed
 
 - Phones only allow GPS and the camera on **HTTPS** — Vercel gives you that automatically.
 - Uploads are limited to about 3 MB each (Vercel's request size limit is 4.5 MB). Photos are shrunk before upload.
-- Photo and resume links go through the app, which checks who is logged in. The underlying Blob URLs
-  are random and never shown to users.
+- Photo and resume links go through the app, which checks who is logged in. Create the Blob store as
+  **Private** — the files can then only be read with the server's token.
 - Data you created locally (`data/`) is not copied to the live site.
 
 ## Code map
