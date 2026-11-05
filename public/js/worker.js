@@ -2,7 +2,7 @@ import {
   state, api, html, raw, mount, $, $$, busy, toast, modal, confirmDialog, icons,
   fmtRange, fmtDateTime, fmtTime, fmtDate, payLabel, money, fmtDistance, relTime,
   rankBadge, rankByKey, stars, avatar, statusChip, empty,
-  fileToDataUrl, compressImage, getPosition, distanceMeters, tagChips, termsBlock, payDueDate,
+  fileToDataUrl, compressImage, getPosition, distanceMeters, tagChips, termsBlock, payDueDate, splitTags, tagMatches,
 } from './ui.js';
 import { siteMap } from './map.js';
 import { refreshMe, render } from './main.js';
@@ -74,11 +74,15 @@ function jobModal(e, onDone) {
     <h3 class="terms-title">Payment &amp; rules</h3>
     ${termsBlock(e)}
     ${applied ? html`
-      <div class="callout">You applied — status: ${statusChip(e.my_status)}</div>
+      <div class="callout">You applied — status: ${statusChip(e.my_status)}${e.my_roles ? html`<br><small>Your role: <b>${e.my_roles}</b></small>` : ''}</div>
       ${['pending', 'approved'].includes(e.my_status) ? html`<button class="btn btn-ghost btn-block" id="cancel">Withdraw application</button>` : ''}`
     : locked ? html`<div class="callout callout-warn">This event is for ${rankByKey(e.min_rank).name} rank and above. You are ${state.stats.rank.name}. Do great shifts to rank up!</div>`
     : left <= 0 ? html`<div class="callout callout-warn">All spots are filled.</div>`
     : html`<form id="apply" class="form">
+        ${e.skills ? html`<div class="field"><span class="label">Which role do you want? <small class="muted">(pick one or more)</small></span>
+          <div class="tag-pick">${splitTags(e.skills).map((s) => html`<label class="tag-opt"><input type="checkbox" name="role" value="${s}"><span>${s}</span></label>`)}</div></div>` : ''}
+        ${e.languages ? html`<div class="field"><span class="label">Which of these languages can you speak?</span>
+          <div class="tag-pick">${splitTags(e.languages).map((s) => html`<label class="tag-opt"><input type="checkbox" name="lang" value="${s}" ${tagMatches(s, state.profile?.languages) ? 'checked' : ''}><span>${s}</span></label>`)}</div></div>` : ''}
         <label class="field"><span class="label">Message to organiser (optional)</span>
           <input name="note" maxlength="500" placeholder="e.g. I've done 3 roadshows before, can arrive early"></label>
         <label class="agree"><input type="checkbox" name="agree" required>
@@ -90,8 +94,14 @@ function jobModal(e, onDone) {
   $('#apply', m.el)?.addEventListener('submit', (ev) => {
     ev.preventDefault();
     busy(ev.submitter, async () => {
-      if (!ev.target.elements.agree.checked) throw new Error('Please tick that you agree to the terms first.');
-      await api(`/api/events/${e.id}/apply`, { method: 'POST', body: { note: ev.target.elements.note.value, acceptTerms: true } });
+      const f = ev.target;
+      const picked = (name) => [...f.querySelectorAll(`input[name="${name}"]:checked`)].map((i) => i.value);
+      const roles = picked('role');
+      const languages = picked('lang');
+      if (e.skills && !roles.length) throw new Error('Pick at least one role you want to do.');
+      if (e.languages && !languages.length) throw new Error('Tick the languages you can speak.');
+      if (!f.elements.agree.checked) throw new Error('Please tick that you agree to the terms first.');
+      await api(`/api/events/${e.id}/apply`, { method: 'POST', body: { note: f.elements.note.value, roles, languages, acceptTerms: true } });
       m.close();
       toast('Applied! You’ll see it under My shifts once the organiser replies.');
       onDone();
@@ -346,7 +356,7 @@ async function profile(view) {
         <div class="field"><span class="label">Resume / CV (optional)</span>
           <div class="resume-box" id="resume-box"></div>
           <input type="file" id="cv-in" accept=".pdf,.doc,.docx,image/*" hidden>
-          <span class="hint">PDF, Word or photo, up to 8 MB.</span></div>
+          <span class="hint">PDF, Word or photo, up to 3 MB.</span></div>
       </section>
       <div class="form-actions"><button class="btn btn-primary btn-lg" type="submit">${first ? 'Save and start finding jobs' : 'Save changes'}</button></div>
     </form>`);
@@ -367,7 +377,7 @@ async function profile(view) {
   $('#cv-in').onchange = async (ev) => {
     const f = ev.target.files[0];
     if (!f) return;
-    if (f.size > 8 * 1024 * 1024) return toast('That file is over 8 MB.', 'error');
+    if (!f.type.startsWith("image/") && f.size > 3 * 1024 * 1024) return toast("That file is over 3 MB. Try saving it as a smaller PDF.", "error");
     resumeData = { name: f.name, dataUrl: f.type.startsWith('image/') ? await compressImage(f, 2000, 0.85) : await fileToDataUrl(f) };
     removeResume = false;
     bindResume();

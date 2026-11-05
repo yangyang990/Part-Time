@@ -66,6 +66,13 @@ export const SKILL_PRESETS = ['Sales', 'Promotion', 'Product sampling', 'Usher',
 export const LANGUAGE_PRESETS = ['English', 'Malay', 'Chinese (Mandarin)', 'Cantonese', 'Hokkien', 'Tamil'];
 const splitTags = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
 
+/** Tick-box chips: the presets plus any custom tags already on the event (those come ticked). */
+const tagOptions = (name, presets, current) => {
+  const have = splitTags(current);
+  const custom = have.filter((s) => !presets.includes(s));
+  return [...presets, ...custom].map((s) => html`<label class="tag-opt"><input type="checkbox" name="${name}" value="${s}" ${have.includes(s) ? 'checked' : ''}><span>${s}</span></label>`);
+};
+
 const DRESS_PRESETS = ['Black T-shirt', 'All black', 'White shirt, black pants', 'Smart casual', 'Formal', 'Closed shoes', 'Uniform provided'];
 
 async function eventForm(view, id) {
@@ -133,11 +140,13 @@ async function eventForm(view, id) {
       <section class="card form-section">
         <h2>Who you need</h2>
         <div class="field"><span class="label">Skills / job type</span>
-          <div class="tag-pick">${SKILL_PRESETS.map((s) => html`<label class="tag-opt"><input type="checkbox" name="skill" value="${s}" ${splitTags(e.skills).includes(s) ? 'checked' : ''}><span>${s}</span></label>`)}</div>
-          <input name="skills_other" value="${splitTags(e.skills).filter((s) => !SKILL_PRESETS.includes(s)).join(', ')}" placeholder="Other skills, comma separated (e.g. Barista, Photography)"></div>
+          <div class="tag-pick" id="pick-skill">${tagOptions('skill', SKILL_PRESETS, e.skills)}</div>
+          <div class="add-row"><input name="skills_other" placeholder="Add another skill (e.g. Barista, Photography)">
+            <button type="button" class="btn btn-ghost btn-sm" data-add="skill">+ Add</button></div></div>
         <div class="field"><span class="label">Languages they must speak</span>
-          <div class="tag-pick">${LANGUAGE_PRESETS.map((s) => html`<label class="tag-opt"><input type="checkbox" name="language" value="${s}" ${splitTags(e.languages).includes(s) ? 'checked' : ''}><span>${s}</span></label>`)}</div>
-          <input name="languages_other" value="${splitTags(e.languages).filter((s) => !LANGUAGE_PRESETS.includes(s)).join(', ')}" placeholder="Other languages, comma separated">
+          <div class="tag-pick" id="pick-language">${tagOptions('language', LANGUAGE_PRESETS, e.languages)}</div>
+          <div class="add-row"><input name="languages_other" placeholder="Add another language (e.g. Japanese)">
+            <button type="button" class="btn btn-ghost btn-sm" data-add="language">+ Add</button></div>
           <span class="hint">Leave everything unticked if any language is fine.</span></div>
       </section>
 
@@ -165,6 +174,29 @@ async function eventForm(view, id) {
   form.elements.radius_m.oninput = () => { $('#radius-val').textContent = `${form.elements.radius_m.value} m`; picker.setRadius(Number(form.elements.radius_m.value)); };
 
   $('#terms-default').onclick = () => { form.elements.terms.value = state.meta.defaultTerms; };
+
+  // "+ Add" (or Enter) turns what was typed into a ticked chip.
+  const other = { skill: 'skills_other', language: 'languages_other' };
+  const addTags = (kind) => {
+    const input = form.elements[other[kind]];
+    for (const value of splitTags(input.value)) {
+      const box = [...form.querySelectorAll(`input[name="${kind}"]`)].find((i) => i.value.toLowerCase() === value.toLowerCase());
+      if (box) { box.checked = true; continue; }
+      const label = document.createElement('label');
+      label.className = 'tag-opt';
+      const cb = Object.assign(document.createElement('input'), { type: 'checkbox', name: kind, value: value.slice(0, 40), checked: true });
+      const span = document.createElement('span');
+      span.textContent = cb.value;
+      label.append(cb, span);
+      $(`#pick-${kind}`).append(label);
+    }
+    input.value = '';
+    input.focus();
+  };
+  for (const [kind, name] of Object.entries(other)) {
+    form.querySelector(`[data-add="${kind}"]`).onclick = () => addTags(kind);
+    form.elements[name].onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); addTags(kind); } };
+  }
 
   for (const b of $$('[data-preset]')) {
     b.onclick = () => {
@@ -224,14 +256,22 @@ async function eventManage(view, id) {
   const ended = new Date(e.end_at) <= new Date();
   const reload = () => eventManage(view, id);
 
-  const who = (a) => html`
+  const who = (a, withRole = false) => html`
     <button class="person" data-profile="${a.worker_id}">
       ${avatar(a.avatar, a.name, 44)}
       <span class="person-text"><b>${a.name}</b>
         <span class="person-sub">${a.stats ? rankBadge(a.stats.rank) : ''}
           ${a.stats?.ratedJobs ? html`${stars(a.stats.avgStars)} <span class="muted">${a.stats.avgStars.toFixed(1)} · ${a.stats.ratedJobs} rated</span>` : html`<span class="muted">No ratings yet</span>`}</span>
+        ${withRole && a.chosen_roles ? roleChips(a.chosen_roles) : ''}
       </span>
     </button>`;
+  // Event languages, ticked exactly where the applicant said they speak it.
+  const speaks = (list, chosen) => {
+    const have = new Set(splitTags(chosen).map((s) => s.toLowerCase()));
+    return html`<span class="tags">${splitTags(list).map((l) => have.has(l.toLowerCase())
+      ? html`<span class="tag tag-hit">✓ ${l}</span>` : html`<span class="tag tag-miss">✗ ${l}</span>`)}</span>`;
+  };
+  const roleChips = (list) => html`<span class="tags">${splitTags(list).map((r) => html`<span class="tag tag-role">${r}</span>`)}</span>`;
 
   const proof = (a, kind) => {
     const at = a[`${kind}_at`];
@@ -247,7 +287,7 @@ async function eventManage(view, id) {
 
   const crewRow = (a) => html`
     <div class="crew-row">
-      ${who(a)}
+      ${who(a, true)}
       <div class="crew-cell"><span class="cell-label">Check in</span>${proof(a, 'checkin')}</div>
       <div class="crew-cell"><span class="cell-label">Check out</span>${proof(a, 'checkout')}</div>
       <div class="crew-cell"><span class="cell-label">Pay</span>
@@ -302,8 +342,9 @@ async function eventManage(view, id) {
         ${who(a)}
         <div class="app-mid">
           ${a.note ? html`<p class="note">“${a.note}”</p>` : ''}
-          ${e.languages ? html`<div class="match"><small class="muted">Languages</small>${tagChips(e.languages, a.languages)}</div>` : ''}
-          ${e.skills ? html`<div class="match"><small class="muted">Skills</small>${tagChips(e.skills, `${a.skills || ''} ${a.experience || ''}`)}</div>` : ''}
+          ${a.chosen_roles ? html`<div class="match"><small class="muted">Wants to do</small>${roleChips(a.chosen_roles)}</div>`
+            : e.skills ? html`<div class="match"><small class="muted">Skills</small>${tagChips(e.skills, `${a.skills || ''} ${a.experience || ''}`)}</div>` : ''}
+          ${e.languages ? html`<div class="match"><small class="muted">Speaks</small>${a.chosen_languages != null || a.chosen_roles ? speaks(e.languages, a.chosen_languages) : tagChips(e.languages, a.languages)}</div>` : ''}
           ${!e.languages && !e.skills && !a.note ? html`<small class="muted">${[a.languages, a.skills].filter(Boolean).join(' · ') || ''}</small>` : ''}
         </div>
         <div class="row">

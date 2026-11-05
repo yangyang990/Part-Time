@@ -10,9 +10,11 @@
     "seed": "node seed.js"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@vercel/blob": "^2.8.2",
     "express": "^4.21.2"
   }
 }

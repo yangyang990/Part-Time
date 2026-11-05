@@ -421,6 +421,11 @@ a.list-row:hover { text-decoration: none; background: var(--surface-2); }
 .tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .tag { font-size: .75rem; font-weight: 600; padding: 2px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
 .tag-hit { background: var(--ok-soft); color: var(--ok); }
+.add-row { display: flex; gap: 8px; align-items: stretch; }
+.add-row input { flex: 1; min-width: 0; }
+.add-row .btn { white-space: nowrap; }
+.tag-role { background: var(--yellow); color: #2a2166; }
+.person-text .tags { margin-top: 4px; }
 .tag-miss { background: var(--surface-2); color: var(--muted); }
 .card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .reqs { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
