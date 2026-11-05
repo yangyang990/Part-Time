@@ -44,7 +44,7 @@ Demo logins (password `demo1234`): `admin@demo.test` (organiser), `worker@demo.t
 | `DATA_DIR` | `./data` | Local only: where the database and uploads are stored |
 | `TURSO_DATABASE_URL` | — | Production database (Turso). If set, used instead of the local file |
 | `TURSO_AUTH_TOKEN` | — | Token for the Turso database |
-| `BLOB_READ_WRITE_TOKEN` | — | Production file storage (Vercel Blob). Added automatically when you connect a Blob store |
+| `BLOB_STORE_ID` / `BLOB_READ_WRITE_TOKEN` | — | Production file storage (Vercel Blob). Added automatically when you connect a Blob store |
 
 ## Rules worth knowing
 
@@ -82,7 +82,7 @@ and photos/resumes live in **Vercel Blob**. Locally nothing changes.
 ### 3. Add photo storage
 
 1. In the Vercel project → **Storage** → **Create** → **Blob** (Access: **Private**) → connect it to this project.
-   This adds `BLOB_READ_WRITE_TOKEN` automatically.
+   This adds `BLOB_STORE_ID` (or `BLOB_READ_WRITE_TOKEN` for older stores) automatically.
 2. **Deployments** → latest → **⋯ → Redeploy** so the new variable is picked up.
 
 The database tables are created automatically on the first request.
