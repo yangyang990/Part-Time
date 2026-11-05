@@ -4,6 +4,7 @@ import {
   rankBadge, rankByKey, stars, avatar, statusChip, empty,
   fileToDataUrl, compressImage, getPosition, distanceMeters, tagChips, termsBlock, payDueDate, splitTags, tagMatches,
   taskDueLabel, taskDueAt, taskLate,
+  expectedPay, shiftHours, fmtHours, payEstimate, bindPayEstimate,
 } from './ui.js';
 import { chatPage } from './chat.js';
 import { siteMap } from './map.js';
@@ -37,6 +38,7 @@ async function jobs(view) {
         <div class="meta">
           <span>${raw(icons.clock)}${fmtRange(e.start_at, e.end_at)}</span>
           <span>${raw(icons.pin)}${e.location_name}</span>
+          <span>${raw(icons.cash)}<b>${money(expectedPay(e))}</b>&nbsp;for this shift</span>
           ${e.dress_code ? html`<span>${raw(icons.shirt)}${e.dress_code}</span>` : ''}
         </div>
         ${e.skills || e.languages ? html`<div class="card-tags">${tagChips(e.skills)}${tagChips(e.languages, state.profile?.languages)}</div>` : ''}
@@ -65,7 +67,7 @@ function jobModal(e, onDone) {
     <dl class="facts">
       <div><dt>${raw(icons.clock)} When</dt><dd>${fmtRange(e.start_at, e.end_at)}<small>${relTime(e.start_at)}</small></dd></div>
       <div><dt>${raw(icons.pin)} Where</dt><dd>${e.location_name}</dd></div>
-      <div><dt>${raw(icons.cash)} Pay</dt><dd>${payLabel(e)}</dd></div>
+      <div><dt>${raw(icons.cash)} Pay</dt><dd>${payLabel(e)}<small>${money(expectedPay(e))} in total for ${fmtHours(shiftHours(e))}</small></dd></div>
       <div><dt>${raw(icons.shirt)} Wear</dt><dd>${e.dress_code || 'No dress code given'}</dd></div>
       <div><dt>${raw(icons.users)} Spots</dt><dd>${left > 0 ? `${left} of ${e.slots} left` : 'Full'}${e.min_rank !== 'rookie' ? html` · ${rankBadge(rankByKey(e.min_rank))}+ only` : ''}</dd></div>
     </dl>
@@ -75,6 +77,8 @@ function jobModal(e, onDone) {
       ${e.languages ? html`<div><span class="label">Must speak</span>${tagChips(e.languages, state.profile?.languages)}</div>` : ''}
     </div>` : ''}
     <div id="job-map" class="map"></div>
+    <h3 class="terms-title">What you'll earn</h3>
+    ${payEstimate(e)}
     <h3 class="terms-title">Payment &amp; rules</h3>
     ${termsBlock(e)}
     ${applied ? html`
@@ -95,6 +99,7 @@ function jobModal(e, onDone) {
       </form>`}`, { wide: true });
 
   siteMap($('#job-map', m.el), e);
+  bindPayEstimate(m.el, e);
   $('#apply', m.el)?.addEventListener('submit', (ev) => {
     ev.preventDefault();
     busy(ev.submitter, async () => {
@@ -148,10 +153,10 @@ async function shifts(view) {
       <div class="meta">
         <span>${raw(icons.clock)}${fmtRange(s.start_at, s.end_at)}</span>
         <span>${raw(icons.pin)}${s.location_name} · <a href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}" target="_blank" rel="noopener">Directions</a></span>
-        <span>${raw(icons.cash)}${payLabel(s)}</span>
+        <span>${raw(icons.cash)}${payLabel(s)} · <b>${money(expectedPay(s))}</b>&nbsp;for the shift</span>
         ${s.dress_code ? html`<span>${raw(icons.shirt)}${s.dress_code}</span>` : ''}
       </div>
-      <button class="link-btn small" data-terms="${s.id}">View payment &amp; rules</button>
+      <button class="link-btn small" data-terms="${s.id}">Pay calculator, payment &amp; rules</button>
       ${s.tasks.length ? taskList(s) : ''}
       <div class="shift-action">${action}
         <a class="btn btn-ghost btn-block" href="#/shifts/chat/${s.event_id}">${raw(icons.chat)} Group chat</a></div>
@@ -179,10 +184,19 @@ async function shifts(view) {
   };
 
   const totalEarned = history.reduce((n, s) => n + (s.earnings?.amount || 0), 0);
+  const deductionLines = (s) => {
+    let items = [];
+    try { items = JSON.parse(s.deduction_items || '[]'); } catch { items = []; }
+    if (!items.length) items = [{ label: s.deduction_reason || 'Deduction', amount: s.earnings.deduction }];
+    return items.map((i) => html`<small class="warn">−${money(i.amount)} ${i.label}</small>`);
+  };
+  const needsPayDetails = !state.profile?.pay_method && all.some((s) => s.status === 'approved');
 
   mount(view, html`
     <div class="page-head"><div><h1>My shifts</h1>
       <p class="muted">${active.length} upcoming${totalEarned ? ` · ${money(totalEarned)} earned so far` : ''}</p></div></div>
+    ${needsPayDetails ? html`<div class="callout callout-warn pay-callout">${raw(icons.cash)}
+      <span>Add your bank or e-wallet details so organisers can pay you. <a href="#/profile">Add payment details</a></span></div>` : ''}
     ${active.length ? html`<div class="grid">${active.map(activeCard)}</div>`
       : empty('No confirmed shifts yet', 'Apply for jobs and they will appear here once an organiser approves you.',
         html`<a class="btn btn-primary" href="#/jobs">Find jobs</a>`)}
@@ -194,15 +208,20 @@ async function shifts(view) {
         <span class="person-text"><b>${s.title}</b><span class="muted">${fmtDate(s.start_at)} · ${s.location_name}</span></span>
         ${s.status !== 'approved' ? statusChip(s.status)
           : s.earnings ? html`<span class="dir-stat"><b>${money(s.earnings.amount)}</b>
-              <small>${s.earnings.hours} h · paid by ${fmtDate(payDueDate(s).toISOString())}</small>
-              ${s.earnings.deduction ? html`<small class="warn">−${money(s.earnings.deduction)} ${s.deduction_reason || ''}</small>` : ''}</span>`
+              <small>${s.paid_at ? html`<span class="chip chip-approved">Paid ${fmtDate(s.paid_at)}</span>` : `${s.earnings.hours} h · paid by ${fmtDate(payDueDate(s).toISOString())}`}</small>
+              ${s.earnings.deduction ? deductionLines(s) : ''}</span>`
           : html`<span class="muted small">No check-out</span>`}
         ${s.stars != null ? html`<span class="dir-stat">${stars(s.stars)}<small>${s.stars.toFixed(1)}</small></span>`
           : s.status === 'approved' ? html`<small class="muted">Not rated yet</small>` : html`<span></span>`}
       </div>`)}</div>` : ''}`);
 
   for (const b of $$('[data-terms]')) {
-    b.onclick = () => { const s = all.find((x) => x.id === Number(b.dataset.terms)); modal(html`<h2>${s.title}</h2><h3 class="terms-title">Payment &amp; rules</h3>${termsBlock(s)}`); };
+    b.onclick = () => {
+      const s = all.find((x) => x.id === Number(b.dataset.terms));
+      const m = modal(html`<h2>${s.title}</h2><h3 class="terms-title">What you'll earn</h3>${payEstimate(s)}
+        <h3 class="terms-title">Payment &amp; rules</h3>${termsBlock(s)}`);
+      bindPayEstimate(m.el, s);
+    };
   }
   for (const b of $$('[data-task]')) {
     b.onclick = () => {
@@ -429,8 +448,38 @@ async function profile(view) {
           <input type="file" id="cv-in" accept=".pdf,.doc,.docx,image/*" hidden>
           <span class="hint">PDF, Word or photo, up to 3 MB.</span></div>
       </section>
+      <section class="card form-section pay-section" id="pay">
+        <h2>Payment details</h2>
+        <p class="hint">Where organisers send your pay. Only organisers of events you're approved for can see this.</p>
+        <div class="field-row">
+          <label class="field"><span class="label">Payment method</span><select name="pay_method">
+            <option value="">— Not set —</option>
+            ${state.meta.payMethods.map((x) => html`<option ${p.pay_method === x ? 'selected' : ''}>${x}</option>`)}</select></label>
+          <label class="field" data-bank-only><span class="label">Bank</span><select name="bank_name">
+            <option value="">Choose bank</option>
+            ${state.meta.banks.map((x) => html`<option ${p.bank_name === x ? 'selected' : ''}>${x}</option>`)}</select></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span class="label" id="acct-label">Account number</span>
+            <input name="bank_account_no" inputmode="numeric" autocomplete="off" maxlength="40" value="${p.bank_account_no || ''}"></label>
+          <label class="field"><span class="label">Name on the account</span>
+            <input name="bank_account_name" maxlength="100" value="${p.bank_account_name || state.user.name}"></label>
+        </div>
+      </section>
       <div class="form-actions"><button class="btn btn-primary btn-lg" type="submit">${first ? 'Save and start finding jobs' : 'Save changes'}</button></div>
     </form>`);
+
+  // Show the bank picker and the right label for the chosen payment method.
+  const pf = $('#pf');
+  const syncPay = () => {
+    const method = pf.elements.pay_method.value;
+    $('[data-bank-only]').hidden = method !== 'Bank transfer';
+    $('#acct-label').textContent = method === 'DuitNow' ? 'DuitNow ID (phone, IC or account no.)'
+      : method === "Touch 'n Go eWallet" ? "Touch 'n Go phone number" : 'Account number';
+    for (const n of ['bank_account_no', 'bank_account_name']) pf.elements[n].disabled = !method;
+  };
+  pf.elements.pay_method.onchange = syncPay;
+  syncPay();
 
   const drawResume = () => mount($('#resume-box'), resumeData
     ? html`<span>${raw(icons.file)} ${resumeData.name}</span><button type="button" class="btn btn-ghost btn-sm" data-cv>Change</button>`

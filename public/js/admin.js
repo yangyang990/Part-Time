@@ -3,6 +3,7 @@ import {
   fmtRange, fmtDateTime, fmtTime, fmtDate, payLabel, money, fmtDistance, toLocalInput, relTime,
   rankBadge, rankByKey, stars, avatar, statusChip, empty, tagChips, termsBlock, lateMinutes,
   taskDueLabel, taskDueAt, taskLate,
+  dedRules, ruleCharge, expectedPay, payEstimate, bindPayEstimate, fmtHours, payDueDate,
 } from './ui.js';
 import { chatPage } from './chat.js';
 import { siteMap, pickerMap, geocode } from './map.js';
@@ -87,7 +88,7 @@ async function eventForm(view, id) {
     e = { title: '', description: '', location_name: '', lat: null, lng: null, radius_m: 200,
       start_at: start.toISOString(), end_at: end.toISOString(), pay: '', pay_unit: 'hour',
       dress_code: '', slots: 5, min_rank: 'rookie', status: 'open',
-      skills: '', languages: '', payment_days: 14, terms: state.meta.defaultTerms };
+      skills: '', languages: '', payment_days: 14, terms: state.meta.defaultTerms, deduction_rules: null };
   }
 
   mount(view, html`
@@ -160,6 +161,11 @@ async function eventForm(view, id) {
         <label class="field"><span class="label">Terms &amp; conditions (one rule per line)</span>
           <textarea name="terms" rows="8" placeholder="e.g. Late check-in: RM10 deducted for every 15 minutes late">${e.terms || ''}</textarea></label>
         <span class="hint">Part-timers must tick “I agree” to these before they can apply. <button type="button" class="link-btn" id="terms-default">Use the default rules</button></span>
+        <div class="field"><span class="label">Deductions (${state.meta.currency})</span>
+          <div class="ded-list" id="ded-list"></div>
+          <div class="row"><button type="button" class="btn btn-ghost btn-sm" id="ded-add">${raw(icons.plus)} Add deduction</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="ded-late">${raw(icons.plus)} Add late rule</button></div>
+          <span class="hint">Part-timers see these amounts in a pay calculator before applying. When you deduct pay, you pick from this list.</span></div>
       </section>
 
       <div class="form-actions">
@@ -177,6 +183,27 @@ async function eventForm(view, id) {
   form.elements.radius_m.oninput = () => { $('#radius-val').textContent = `${form.elements.radius_m.value} m`; picker.setRadius(Number(form.elements.radius_m.value)); };
 
   $('#terms-default').onclick = () => { form.elements.terms.value = state.meta.defaultTerms; };
+
+  // Deduction rules: fixed amounts, plus at most one "per X minutes late" rule.
+  const dedRow = (r) => html`<div class="ded-row" data-late-rule="${r.per_min ? 1 : ''}">
+    <input class="ded-label" value="${r.label}" maxlength="60" placeholder="e.g. Wrong attire" aria-label="Deduction reason">
+    <span class="inline-num"><input class="ded-amount" type="number" min="0" step="0.5" value="${r.amount}" aria-label="Amount"></span>
+    <button type="button" class="btn btn-ghost btn-sm ded-rm" aria-label="Remove">${raw(icons.x)}</button>
+    ${r.per_min ? html`<span class="inline-num ded-per">for every <input class="ded-per-min" type="number" min="1" max="240" value="${r.per_min}" aria-label="Minutes"> minutes late</span>` : ''}
+  </div>`;
+  const dedList = $('#ded-list');
+  const syncLateBtn = () => { $('#ded-late').hidden = !!dedList.querySelector('[data-late-rule="1"]'); };
+  mount(dedList, dedRules(e).map(dedRow));
+  syncLateBtn();
+  const addRow = (r) => { dedList.insertAdjacentHTML('beforeend', String(dedRow(r))); syncLateBtn(); dedList.lastElementChild.querySelector('input').focus(); };
+  $('#ded-add').onclick = () => addRow({ label: '', amount: '' });
+  $('#ded-late').onclick = () => addRow({ label: 'Late check-in', amount: 10, per_min: 15 });
+  dedList.addEventListener('click', (ev) => { const b = ev.target.closest('.ded-rm'); if (b) { b.closest('.ded-row').remove(); syncLateBtn(); } });
+  const readDedRows = () => [...dedList.querySelectorAll('.ded-row')].map((row) => ({
+    label: row.querySelector('.ded-label').value.trim(),
+    amount: Number(row.querySelector('.ded-amount').value) || 0,
+    ...(row.dataset.lateRule ? { per_min: Number(row.querySelector('.ded-per-min').value) || 15 } : {}),
+  })).filter((r) => r.label);
 
   // "+ Add" (or Enter) turns what was typed into a ticked chip.
   const other = { skill: 'skills_other', language: 'languages_other' };
@@ -240,6 +267,7 @@ async function eventForm(view, id) {
       start_at: f.start_at && new Date(f.start_at).toISOString(),
       end_at: f.end_at && new Date(f.end_at).toISOString(),
       status: form.elements.open.checked ? 'open' : 'closed',
+      deduction_rules: JSON.stringify(readDedRows()),
     };
     busy(ev.submitter, async () => {
       const res = await api(id ? `/api/admin/events/${id}` : '/api/admin/events', { method: id ? 'PUT' : 'POST', body });
@@ -306,6 +334,27 @@ async function eventManage(view, id) {
       </div>
     </div>`;
 
+  // Everyone who worked (checked in) gets a payment line once they have checked out or the event is over.
+  const payRows = crew.filter((a) => a.checkin_at && (a.checkout_at || ended));
+  const netOf = (a) => (a.earnings ? a.earnings.amount : 0);
+  const toPay = payRows.filter((a) => !a.paid_at).reduce((n, a) => n + netOf(a), 0);
+  const payDetails = (a) => {
+    if (!a.pay_method) return html`<span class="warn small">${raw(icons.warn)} No payment details in their profile yet</span>`;
+    return html`<span class="pay-details"><b>${a.pay_method}${a.bank_name ? ` · ${a.bank_name}` : ''}</b>
+      <span class="pay-acct"><code>${a.bank_account_no}</code><button type="button" class="link-btn small" data-copy="${a.bank_account_no}">Copy</button></span>
+      <small class="muted">${a.bank_account_name}</small></span>`;
+  };
+  const payRow = (a) => html`<div class="pay-row ${a.paid_at ? 'is-paid' : ''}">
+    ${who(a)}
+    <div class="crew-cell"><span class="cell-label">To pay</span>
+      ${a.earnings ? html`<b>${money(a.earnings.amount)}</b><small>${money(a.earnings.gross)} for ${fmtHours(a.earnings.hours)}${a.earnings.deduction ? html` · <span class="warn">−${money(a.earnings.deduction)}</span>` : ''}</small>`
+        : html`<span class="muted">No check-out</span>`}</div>
+    <div class="crew-cell">${payDetails(a)}</div>
+    <div class="crew-cell crew-actions">${a.paid_at
+      ? html`<span class="chip chip-approved">Paid ${fmtDate(a.paid_at)}</span><button class="link-btn small" data-paid="${a.id}" data-to="0">Undo</button>`
+      : html`<button class="btn btn-primary btn-sm" data-paid="${a.id}" data-to="1">Mark paid</button>`}</div>
+  </div>`;
+
   const taskRow = (t) => {
     const subs = submissions.filter((s) => s.task_id === t.id && crew.some((a) => a.id === s.application_id));
     const waiting = crew.filter((a) => !subs.some((s) => s.application_id === a.id));
@@ -363,7 +412,8 @@ async function eventManage(view, id) {
       </section>
       <section class="card card-flush"><div id="ev-map" class="map"></div></section>
     </div>
-    <details class="card terms-card"><summary><b>Payment &amp; rules</b> <span class="muted small">— part-timers agreed to these when applying</span></summary>${termsBlock(e)}</details>
+    <details class="card terms-card"><summary><b>Payment &amp; rules</b> <span class="muted small">— part-timers agreed to these when applying</span></summary>
+      ${termsBlock(e)}<h3 class="terms-title">Pay calculator</h3>${payEstimate(e)}</details>
 
     <h2 class="section-title">Applicants <span class="count">${pending.length}</span></h2>
     ${pending.length ? html`<div class="card list">${pending.map((a) => html`
@@ -385,6 +435,10 @@ async function eventManage(view, id) {
     <h2 class="section-title">Crew &amp; attendance <span class="count">${crew.length}/${e.slots}</span></h2>
     ${crew.length ? html`<div class="card list crew-list">${crew.map(crewRow)}</div>`
       : html`<p class="muted">Approve applicants to build your crew. Their check-ins will show here with photo and GPS proof.</p>`}
+
+    ${payRows.length ? html`<h2 class="section-title">Payments <span class="count">${payRows.filter((a) => a.paid_at).length}/${payRows.length} paid</span></h2>
+      <p class="muted small">Pay by ${fmtDate(payDueDate(e).toISOString())} (${e.payment_days ?? 14} days after the event). Still to pay: <b>${money(toPay)}</b></p>
+      <div class="card list">${payRows.map(payRow)}</div>` : ''}
 
     <h2 class="section-title">Photo tasks <span class="count">${tasks.length}</span>
       <button class="btn btn-ghost btn-sm push" id="add-task">${raw(icons.plus)} Add task</button></h2>
@@ -428,6 +482,20 @@ async function eventManage(view, id) {
     b.onclick = () => deductModal(applications.find((a) => a.id === Number(b.dataset.deduct)), e, reload);
   }
 
+  bindPayEstimate(view, e);
+  for (const b of $$('[data-copy]')) {
+    b.onclick = async () => {
+      try { await navigator.clipboard.writeText(b.dataset.copy); toast('Account number copied'); }
+      catch { toast('Could not copy — select the number instead', 'error'); }
+    };
+  }
+  for (const b of $$('[data-paid]')) {
+    b.onclick = () => busy(b, async () => {
+      await api(`/api/admin/applications/${b.dataset.paid}/paid`, { method: 'POST', body: { paid: b.dataset.to === '1' } });
+      toast(b.dataset.to === '1' ? 'Marked as paid' : 'Payment mark removed');
+      reload();
+    });
+  }
   $('#add-task').onclick = () => taskModal(e, null, reload);
   for (const b of $$('[data-preset-task]')) b.onclick = () => taskModal(e, TASK_PRESETS[Number(b.dataset.presetTask)], reload);
   for (const b of $$('[data-edit-task]')) b.onclick = () => taskModal(e, tasks.find((t) => t.id === Number(b.dataset.editTask)), reload);
@@ -516,36 +584,85 @@ function shotModal(s, t, a, e) {
       · ${taskDueLabel(t, e)}</p>`, { wide: true });
 }
 
-const DEDUCT_REASONS = ['Late check-in', 'Wrong attire', 'Left post without permission', 'Poor performance', 'Left early'];
-
 function deductModal(a, e, onDone) {
-  const late = lateMinutes(a, e);
+  const late = Math.max(0, lateMinutes(a, e));
+  const rules = dedRules(e);
+  const gross = a.earnings ? a.earnings.gross : expectedPay(e);
+  // Rebuild what was saved before: items whose label starts with a rule's label tick that rule.
+  let saved = [];
+  try { saved = JSON.parse(a.deduction_items || '[]'); } catch { saved = []; }
+  if (!saved.length && a.deduction) saved = [{ label: a.deduction_reason || 'Deduction', amount: a.deduction }];
+  const used = new Set();
+  const ruleState = rules.map((r, i) => {
+    const hit = saved.findIndex((s, j) => !used.has(j) && s.label.startsWith(r.label));
+    if (hit >= 0) used.add(hit);
+    return { on: hit >= 0 || (!saved.length && !!r.per_min && late > 0), amount: hit >= 0 ? saved[hit].amount : ruleCharge(r, late), i };
+  });
+  const custom = saved.filter((_, j) => !used.has(j));
+
   const m = modal(html`
     <h2>Deduct pay · ${a.name}</h2>
-    <p class="muted">${a.earnings ? html`Pay before deduction: <b>${money(a.earnings.gross)}</b>. ` : ''}They will see the amount and reason in My shifts.</p>
-    ${late > 0 ? html`<p class="callout callout-warn">Checked in ${late} minutes late.</p>` : ''}
+    <p class="muted">Pick what applies from this event's deduction list. ${a.name.split(' ')[0]} sees each item in My shifts.</p>
+    ${late > 0 ? html`<p class="callout callout-warn">Checked in ${late} minutes late${a.checkin_at ? ` (${fmtTime(a.checkin_at)})` : ''}.</p>` : ''}
     <form id="deduct-form" class="form">
-      <label class="field"><span class="label">Amount (${state.meta.currency})</span>
-        <input type="number" name="amount" min="0" step="0.01" value="${a.deduction || ''}" placeholder="0.00" required></label>
-      <label class="field"><span class="label">Reason</span>
-        <input name="reason" value="${a.deduction_reason || ''}" placeholder="e.g. Late 30 minutes">
-        <span class="presets">${DEDUCT_REASONS.map((r) => html`<button type="button" class="preset" data-reason="${r}">${r}</button>`)}</span></label>
+      <div class="ded-pick">
+        ${rules.map((r, i) => html`<label class="ded-opt">
+          <input type="checkbox" data-rule="${i}" ${ruleState[i].on ? 'checked' : ''}>
+          <span><b>${r.label}</b><small class="muted">${r.per_min ? `${money(r.amount)} per ${r.per_min} min late${late > 0 ? ` · ${late} min late` : ''}` : 'From the event rules'}</small></span>
+          <span class="inline-num"><input type="number" min="0" step="0.5" data-amt="${i}" value="${ruleState[i].amount}"></span>
+        </label>`)}
+        <label class="ded-opt">
+          <input type="checkbox" data-rule="other" ${custom.length ? 'checked' : ''}>
+          <span><b>Other</b><input class="ded-other" maxlength="100" placeholder="Reason" value="${custom.map((c) => c.label).join(', ')}"></span>
+          <span class="inline-num"><input type="number" min="0" step="0.5" data-amt="other" value="${custom.reduce((n, c) => n + c.amount, 0) || ''}"></span>
+        </label>
+      </div>
+      <div class="ded-sum">
+        <span>Pay ${a.earnings ? `for ${fmtHours(a.earnings.hours)}` : '(full shift)'}</span><b>${money(gross)}</b>
+        <span>Deductions</span><b class="warn" id="ded-total">−${money(0)}</b>
+        <span>They will receive</span><b id="ded-net">${money(gross)}</b>
+      </div>
       <div class="row-end">
-        ${a.deduction ? html`<button type="button" class="btn btn-ghost" id="deduct-clear">Remove deduction</button>` : ''}
-        <button class="btn btn-primary" type="submit">Save</button></div>
+        ${a.deduction ? html`<button type="button" class="btn btn-ghost" id="deduct-clear">Remove all</button>` : ''}
+        <button class="btn btn-primary" type="submit">Save deduction</button></div>
     </form>`);
   const form = $('#deduct-form', m.el);
-  for (const b of $$('[data-reason]', m.el)) {
-    b.onclick = () => { form.elements.reason.value = b.dataset.reason + (b.dataset.reason === 'Late check-in' && late > 0 ? ` (${late} min)` : ''); };
-  }
-  const save = (btn, body) => busy(btn, async () => {
-    await api(`/api/admin/applications/${a.id}/deduct`, { method: 'POST', body });
+  const items = () => {
+    const out = [];
+    rules.forEach((r, i) => {
+      if (!form.querySelector(`[data-rule="${i}"]`).checked) return;
+      const amount = Number(form.querySelector(`[data-amt="${i}"]`).value) || 0;
+      out.push({ label: r.per_min && late > 0 ? `${r.label} (${late} min)` : r.label, amount });
+    });
+    if (form.querySelector('[data-rule="other"]').checked) {
+      out.push({ label: form.querySelector('.ded-other').value.trim(), amount: Number(form.querySelector('[data-amt="other"]').value) || 0 });
+    }
+    return out.filter((x) => x.amount > 0);
+  };
+  const update = () => {
+    const total = items().reduce((n, x) => n + x.amount, 0);
+    $('#ded-total', m.el).textContent = `−${money(Math.min(total, gross))}`;
+    $('#ded-net', m.el).textContent = money(Math.max(0, gross - total));
+  };
+  form.addEventListener('input', (ev) => {
+    const key = ev.target.dataset.amt ?? (ev.target.classList.contains('ded-other') ? 'other' : null);
+    if (key != null) form.querySelector(`[data-rule="${key}"]`).checked = true;
+    update();
+  });
+  update();
+  const save = (btn, list) => busy(btn, async () => {
+    await api(`/api/admin/applications/${a.id}/deduct`, { method: 'POST', body: { items: list } });
     m.close();
-    toast(body.amount > 0 ? 'Deduction saved' : 'Deduction removed');
+    toast(list.length ? 'Deduction saved' : 'Deduction removed');
     onDone();
   });
-  $('#deduct-clear', m.el)?.addEventListener('click', (ev) => save(ev.currentTarget, { amount: 0 }));
-  form.onsubmit = (ev) => { ev.preventDefault(); save(ev.submitter, Object.fromEntries(new FormData(form))); };
+  $('#deduct-clear', m.el)?.addEventListener('click', (ev) => save(ev.currentTarget, []));
+  form.onsubmit = (ev) => {
+    ev.preventDefault();
+    const list = items();
+    if (list.some((x) => !x.label)) return toast('Give a reason for the “Other” deduction.', 'error');
+    save(ev.submitter, list);
+  };
 }
 
 function proofModal(a, kind, e) {

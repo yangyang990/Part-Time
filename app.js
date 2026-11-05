@@ -3,7 +3,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, IS_CREW, DEFAULT_TERMS, nowIso, hashPassword, verifyPassword } from './lib/db.js';
+import { db, IS_CREW, DEFAULT_TERMS, DEFAULT_DEDUCTIONS, nowIso, hashPassword, verifyPassword } from './lib/db.js';
 import { RANKS, rankLevel, workerStats, allWorkerStats } from './lib/rank.js';
 import { saveFile, sendStoredFile } from './lib/storage.js';
 
@@ -194,7 +194,8 @@ app.post('/api/auth/role', need(), route(async (req) => {
 }));
 
 app.get('/api/me', route(async (req) => {
-  const meta = { currency: CURRENCY, ranks: RANKS, checkinOpensMin: CHECKIN_OPENS_MIN, defaultTerms: DEFAULT_TERMS };
+  const meta = { currency: CURRENCY, ranks: RANKS, checkinOpensMin: CHECKIN_OPENS_MIN, defaultTerms: DEFAULT_TERMS,
+    defaultDeductions: DEFAULT_DEDUCTIONS, payMethods: PAY_METHODS, banks: BANKS };
   if (!req.user) return { user: null, meta };
   const out = { user: req.user, meta };
   if (req.user.role === 'worker') {
@@ -235,6 +236,7 @@ app.put('/api/profile', need('worker'), route(async (req) => {
     avatar: current.avatar || null,
     resume: current.resume || null,
     resume_name: current.resume_name || null,
+    ...readPayDetails(b),
   };
   if (!p.phone) fail(400, 'Please enter your phone number.');
   if (!p.city) fail(400, 'Please enter the city/area you live in.');
@@ -249,19 +251,52 @@ app.put('/api/profile', need('worker'), route(async (req) => {
   await db.batch([
     ['UPDATE users SET name = ? WHERE id = ?', name, req.user.id],
     [`INSERT INTO profiles (user_id, phone, birth_date, gender, height_cm, city, languages, experience, skills, about,
-                            avatar, resume, resume_name, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            avatar, resume, resume_name, pay_method, bank_name, bank_account_name, bank_account_no, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (user_id) DO UPDATE SET
         phone = excluded.phone, birth_date = excluded.birth_date, gender = excluded.gender,
         height_cm = excluded.height_cm, city = excluded.city, languages = excluded.languages,
         experience = excluded.experience, skills = excluded.skills, about = excluded.about,
         avatar = excluded.avatar, resume = excluded.resume, resume_name = excluded.resume_name,
+        pay_method = excluded.pay_method, bank_name = excluded.bank_name,
+        bank_account_name = excluded.bank_account_name, bank_account_no = excluded.bank_account_no,
         updated_at = excluded.updated_at`,
     req.user.id, p.phone, p.birth_date, p.gender, p.height_cm, p.city, p.languages, p.experience, p.skills,
-    p.about, p.avatar, p.resume, p.resume_name, nowIso()],
+    p.about, p.avatar, p.resume, p.resume_name, p.pay_method, p.bank_name, p.bank_account_name, p.bank_account_no, nowIso()],
   ]);
   return { ok: true, profile: await getProfile(req.user.id) };
 }));
+
+// ---------- payment details ----------
+
+const PAY_METHODS = ['Bank transfer', 'DuitNow', "Touch 'n Go eWallet"];
+const BANKS = ['Maybank', 'CIMB Bank', 'Public Bank', 'RHB Bank', 'Hong Leong Bank', 'AmBank', 'Bank Islam',
+  'Bank Rakyat', 'BSN', 'Alliance Bank', 'Affin Bank', 'OCBC Bank', 'UOB', 'HSBC', 'Standard Chartered',
+  'Agrobank', 'Bank Muamalat', 'GXBank', 'Other'];
+const PAY_FIELDS = ['pay_method', 'bank_name', 'bank_account_name', 'bank_account_no'];
+
+/** Optional on the profile, but if a method is chosen it must be complete enough to pay into. */
+function readPayDetails(b) {
+  const d = {
+    pay_method: PAY_METHODS.includes(b.pay_method) ? b.pay_method : null,
+    bank_name: text(b.bank_name, 60) || null,
+    bank_account_name: text(b.bank_account_name, 100) || null,
+    bank_account_no: text(b.bank_account_no, 40).replace(/\s+/g, ' ') || null,
+  };
+  if (!d.pay_method) return { pay_method: null, bank_name: null, bank_account_name: null, bank_account_no: null };
+  if (d.pay_method !== 'Bank transfer') d.bank_name = null;
+  else if (!d.bank_name) fail(400, 'Choose your bank.');
+  if (!d.bank_account_no) {
+    fail(400, d.pay_method === 'Bank transfer' ? 'Enter your bank account number.'
+      : d.pay_method === 'DuitNow' ? 'Enter your DuitNow ID (phone, IC or account number).' : 'Enter your Touch \'n Go phone number.');
+  }
+  if (!/^[0-9 +\-]{6,40}$/.test(d.bank_account_no)) fail(400, 'Account / ID numbers can only contain digits, spaces, + and -.');
+  if (!d.bank_account_name) fail(400, 'Enter the name on the account.');
+  return d;
+}
+
+/** Organisers only see payment details for people they are paying (approved on their event). */
+const withoutPayDetails = (p) => (p ? Object.fromEntries(Object.entries(p).filter(([k]) => !PAY_FIELDS.includes(k))) : p);
 
 // ---------- part-timer: jobs ----------
 
@@ -329,7 +364,8 @@ app.post('/api/applications/:id/cancel', need('worker'), route(async (req) => {
 app.get('/api/my/shifts', need('worker'), route(async (req) => {
   const rows = await db.all(`
     SELECT a.*, e.title, e.description, e.location_name, e.lat, e.lng, e.radius_m, e.start_at, e.end_at,
-           e.pay, e.pay_unit, e.dress_code, e.payment_days, e.terms, e.skills, e.languages, u.name AS organiser,
+           e.pay, e.pay_unit, e.dress_code, e.payment_days, e.terms, e.skills, e.languages, e.deduction_rules,
+           u.name AS organiser,
            r.stars, r.punctuality, r.attitude, r.performance, r.comment AS rating_comment
     FROM applications a
     JOIN events e ON e.id = a.event_id
@@ -495,6 +531,24 @@ function tags(v) {
   return [...new Set(list)].slice(0, 20).join(', ');
 }
 
+/** Organiser's deduction list for an event: up to 12 rules of {label, amount, per_min?}. Stored as JSON. */
+function readDeductionRules(v) {
+  if (v === undefined || v === null || v === '') return null; // null = use the defaults
+  let list = v;
+  if (typeof v === 'string') { try { list = JSON.parse(v); } catch { fail(400, 'Deduction rules are not valid.'); } }
+  if (!Array.isArray(list)) fail(400, 'Deduction rules are not valid.');
+  const rules = list.slice(0, 12).map((r) => ({
+    label: text(r?.label, 60),
+    amount: Math.round(Number(r?.amount) * 100) / 100,
+    ...(r?.per_min ? { per_min: int(r.per_min) } : {}),
+  })).filter((r) => r.label);
+  for (const r of rules) {
+    if (!(r.amount >= 0 && r.amount <= 10000)) fail(400, `Enter an amount for “${r.label}”.`);
+    if (r.per_min !== undefined && !(r.per_min >= 1 && r.per_min <= 240)) fail(400, 'Late deductions must be per 1 to 240 minutes.');
+  }
+  return JSON.stringify(rules);
+}
+
 function readEvent(b) {
   const e = {
     title: text(b.title, 150),
@@ -515,6 +569,7 @@ function readEvent(b) {
     languages: tags(b.languages),
     payment_days: b.payment_days === '' || b.payment_days == null ? 14 : int(b.payment_days),
     terms: text(b.terms, 4000),
+    deduction_rules: readDeductionRules(b.deduction_rules),
   };
   if (!e.title) fail(400, 'Give the event a title.');
   if (!e.location_name) fail(400, 'Enter the location name or address.');
@@ -551,10 +606,12 @@ app.post('/api/admin/events', need('admin'), route(async (req) => {
   const e = readEvent(req.body);
   const { lastInsertRowid } = await db.run(`
     INSERT INTO events (admin_id, title, description, location_name, lat, lng, radius_m, start_at, end_at,
-                        pay, pay_unit, dress_code, slots, min_rank, status, skills, languages, payment_days, terms, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        pay, pay_unit, dress_code, slots, min_rank, status, skills, languages, payment_days, terms,
+                        deduction_rules, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   req.user.id, e.title, e.description, e.location_name, e.lat, e.lng, e.radius_m, e.start_at, e.end_at,
-  e.pay, e.pay_unit, e.dress_code, e.slots, e.min_rank, e.status, e.skills, e.languages, e.payment_days, e.terms, nowIso());
+  e.pay, e.pay_unit, e.dress_code, e.slots, e.min_rank, e.status, e.skills, e.languages, e.payment_days, e.terms,
+  e.deduction_rules ?? JSON.stringify(DEFAULT_DEDUCTIONS), nowIso());
   return { ok: true, id: lastInsertRowid };
 }));
 
@@ -564,9 +621,9 @@ app.put('/api/admin/events/:id', need('admin'), route(async (req) => {
   await db.run(`
     UPDATE events SET title = ?, description = ?, location_name = ?, lat = ?, lng = ?, radius_m = ?, start_at = ?,
       end_at = ?, pay = ?, pay_unit = ?, dress_code = ?, slots = ?, min_rank = ?, status = ?,
-      skills = ?, languages = ?, payment_days = ?, terms = ? WHERE id = ?`,
+      skills = ?, languages = ?, payment_days = ?, terms = ?, deduction_rules = COALESCE(?, deduction_rules) WHERE id = ?`,
   e.title, e.description, e.location_name, e.lat, e.lng, e.radius_m, e.start_at, e.end_at, e.pay, e.pay_unit,
-  e.dress_code, e.slots, e.min_rank, e.status, e.skills, e.languages, e.payment_days, e.terms, req.params.id);
+  e.dress_code, e.slots, e.min_rank, e.status, e.skills, e.languages, e.payment_days, e.terms, e.deduction_rules, req.params.id);
   return { ok: true };
 }));
 
@@ -589,6 +646,7 @@ app.get('/api/admin/events/:id', need('admin'), route(async (req) => {
   const stats = await allWorkerStats();
   const apps = await db.all(`
     SELECT a.*, u.name, u.email, p.phone, p.avatar, p.city, p.languages, p.skills, p.experience,
+           p.pay_method, p.bank_name, p.bank_account_name, p.bank_account_no,
            r.stars, r.punctuality, r.attitude, r.performance, r.comment AS rating_comment
     FROM applications a
     JOIN users u ON u.id = a.worker_id
@@ -597,7 +655,10 @@ app.get('/api/admin/events/:id', need('admin'), route(async (req) => {
     WHERE a.event_id = ? ORDER BY a.created_at`, event.id);
   return {
     event,
-    applications: apps.map((a) => ({ ...a, stats: stats.get(a.worker_id), earnings: shiftEarnings(event, a) })),
+    applications: apps.map((a) => ({
+      ...(a.status === 'approved' ? a : withoutPayDetails(a)),
+      stats: stats.get(a.worker_id), earnings: shiftEarnings(event, a),
+    })),
     tasks: await eventTasks(event.id),
     submissions: await db.all(`
       SELECT s.* FROM task_submissions s JOIN event_tasks t ON t.id = s.task_id WHERE t.event_id = ?`, event.id),
@@ -677,15 +738,31 @@ app.post('/api/admin/applications/:id/status', need('admin'), route(async (req) 
 }));
 
 // Deduct pay for breaking the event rules (late, wrong attire, poor work...). Amount 0 removes it.
+// Send items: [{label, amount}] (picked from the event's deduction list, or custom). An empty list removes it.
 app.post('/api/admin/applications/:id/deduct', need('admin'), route(async (req) => {
   const { app } = await appForAdmin(req);
   if (app.status !== 'approved') fail(400, 'You can only deduct from approved crew.');
-  const amount = Math.round(Number(req.body.amount) * 100) / 100;
-  if (!(amount >= 0 && amount <= 100000)) fail(400, 'Enter a valid amount.');
-  const reason = text(req.body.reason, 300);
-  if (amount > 0 && !reason) fail(400, 'Give a reason so the part-timer knows why.');
-  await db.run('UPDATE applications SET deduction = ?, deduction_reason = ?, updated_at = ? WHERE id = ?',
-    amount, amount > 0 ? reason : null, nowIso(), app.id);
+  if (app.paid_at) fail(400, 'This person is already marked as paid. Undo that first to change the deduction.');
+  let items = Array.isArray(req.body.items) ? req.body.items
+    : Number(req.body.amount) > 0 ? [{ label: req.body.reason, amount: req.body.amount }] : [];
+  items = items.slice(0, 20).map((i) => ({ label: text(i?.label, 100), amount: Math.round(Number(i?.amount) * 100) / 100 }))
+    .filter((i) => i.amount > 0);
+  for (const i of items) {
+    if (!(i.amount <= 100000)) fail(400, 'Enter a valid amount.');
+    if (!i.label) fail(400, 'Give a reason so the part-timer knows why.');
+  }
+  const total = Math.round(items.reduce((n, i) => n + i.amount, 0) * 100) / 100;
+  await db.run('UPDATE applications SET deduction = ?, deduction_reason = ?, deduction_items = ?, updated_at = ? WHERE id = ?',
+    total, items.length ? items.map((i) => i.label).join(', ').slice(0, 300) : null,
+    items.length ? JSON.stringify(items) : null, nowIso(), app.id);
+  return { ok: true };
+}));
+
+// Record that the organiser has paid this person (or undo it).
+app.post('/api/admin/applications/:id/paid', need('admin'), route(async (req) => {
+  const { app } = await appForAdmin(req);
+  if (app.status !== 'approved' || !app.checkin_at) fail(400, 'Only crew who worked the shift can be marked as paid.');
+  await db.run('UPDATE applications SET paid_at = ?, updated_at = ? WHERE id = ?', req.body.paid ? nowIso() : null, nowIso(), app.id);
   return { ok: true };
 }));
 
@@ -725,7 +802,7 @@ app.get('/api/admin/workers/:id', need('admin'), route(async (req) => {
   if (!user) fail(404, 'Part-timer not found.');
   return {
     user,
-    profile: await getProfile(user.id),
+    profile: withoutPayDetails(await getProfile(user.id)),
     stats: await workerStats(user.id),
     history: await db.all(`
       SELECT a.id, a.status, a.checkin_at, a.checkout_at, e.title, e.start_at, e.location_name,

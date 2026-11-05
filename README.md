@@ -9,6 +9,8 @@ One website, two kinds of users:
 | See live **attendance**: check-in/out time, selfie, distance from site, off-site check-out warning, hours and pay | **Check in / check out** with a selfie + GPS. Check-in is refused if you're outside the radius |
 | **Rate** each person on punctuality, attitude and performance (1–5★) + written feedback | See your **rank**, progress to the next rank, and organisers' feedback |
 | **Photo tasks** per event, e.g. “selfie at your post within the first 30 min”, “photo with the store”, “photo with a teammate”; see who sent theirs, who's late and who's still missing | After check-in, send a photo for each task (with an optional note) right from the shift card |
+| **Deduction list** per event (e.g. RM10 per 15 min late, RM20 wrong attire); when deducting, tick what applies and lateness is calculated for you | **Pay calculator** on every job: total for the shift (e.g. RM1 × 6 h = RM6) and what you'd get if a rule is broken |
+| **Payments** list per event: amount to pay, the person's bank / DuitNow / TNG details with a copy button, and **Mark paid** | Add **payment details** (bank, DuitNow or Touch 'n Go) in the profile; see each deduction and when you were paid |
 | **Group chat** for each event with all approved crew, with text and photos (take one or upload) | Chat with the organiser and the rest of the crew for that event, and send photos from the camera or phone |
 | Crew leaderboard with rank filter and full profile history | |
 
@@ -56,6 +58,7 @@ Demo logins (password `demo1234`): `admin@demo.test` (organiser), `worker@demo.t
 - Paid hours are counted only within the scheduled time (early arrival / late leaving isn't extra pay).
 - Photos and resumes are private: a part-timer can only open their own files; organisers can open all.
 - Photo tasks open after check-in and close at check-out. A task photo sent after its deadline is marked late.
+- Payment details are only shown to the organiser of an event the person is approved for, never in the crew directory. Deductions are locked once a person is marked as paid.
 - Each event's group chat, including its photos, is only visible to its organiser and approved crew. New messages appear within a few seconds.
 
 ## Deploy to Vercel

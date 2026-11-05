@@ -257,4 +257,68 @@ export function taskDueLabel(t, e) {
 /** Was this submission sent after the task's deadline? */
 export const taskLate = (t, e, s) => !!(s && t.due_min != null && new Date(s.created_at) > taskDueAt(t, e));
 
+// ---- pay & deductions ----
+export const shiftHours = (e) => Math.max(0, (new Date(e.end_at) - new Date(e.start_at)) / 36e5);
+export const fmtHours = (h) => `${Math.round(h * 100) / 100} h`;
+/** Full pay for the scheduled shift, before any deduction. */
+export const expectedPay = (e) => (e.pay_unit === 'hour' ? Math.round(Number(e.pay) * shiftHours(e) * 100) / 100 : Number(e.pay));
+/** The event's deduction list ({label, amount, per_min?}). Events from before this existed use the defaults. */
+export function dedRules(e) {
+  if (e.deduction_rules == null) return state.meta.defaultDeductions || [];
+  try { const r = typeof e.deduction_rules === 'string' ? JSON.parse(e.deduction_rules) : e.deduction_rules; return Array.isArray(r) ? r : []; }
+  catch { return []; }
+}
+/** Deduction for one rule; per-minute rules charge every started block of lateness. */
+export const ruleCharge = (r, lateMin = 0) => (r.per_min ? (lateMin > 0 ? Math.ceil(lateMin / r.per_min) * r.amount : 0) : r.amount);
+export const ruleLabel = (r) => (r.per_min ? `${r.label} — ${money(r.amount)} per ${r.per_min} min` : r.label);
+
+/**
+ * "What will I get?" calculator: full pay for the shift, then tick rules to see what would be deducted.
+ * Call bindPayEstimate(root) after mounting.
+ */
+export function payEstimate(e) {
+  const full = expectedPay(e);
+  const rules = dedRules(e);
+  return html`<div class="estimate" data-est="${full}">
+    <div class="est-line"><span>${e.pay_unit === 'hour' ? `${money(e.pay)} × ${fmtHours(shiftHours(e))}` : `${money(e.pay)} per ${e.pay_unit}`}</span>
+      <b>${money(full)}</b></div>
+    ${rules.length ? html`
+      <p class="est-hint">Possible deductions if rules are broken — tick to see what you would get:</p>
+      <ul class="est-rules">${rules.map((r, i) => html`<li>
+        ${r.per_min
+          ? html`<label class="est-rule"><input type="checkbox" data-r="${i}"><span>${r.label}
+              <small>${money(r.amount)} per ${r.per_min} min late</small></span></label>
+            <span class="est-late">by <input type="number" min="0" step="5" value="15" data-late="${i}"> min</span>`
+          : html`<label class="est-rule"><input type="checkbox" data-r="${i}"><span>${r.label}</span></label><span></span>`}
+        <span class="est-amt" data-amt="${i}">−${money(ruleCharge(r, 15))}</span>
+      </li>`)}</ul>
+      <div class="est-line est-total"><span>You would receive</span><b data-total>${money(full)}</b></div>`
+    : html`<p class="est-hint">No deductions are listed for this event.</p>`}
+  </div>`;
+}
+export function bindPayEstimate(root, e) {
+  const box = root.querySelector('[data-est]');
+  if (!box) return;
+  const rules = dedRules(e);
+  const full = Number(box.dataset.est);
+  const update = () => {
+    let total = 0;
+    rules.forEach((r, i) => {
+      const late = Number(box.querySelector(`[data-late="${i}"]`)?.value) || 0;
+      const charge = ruleCharge(r, late);
+      box.querySelector(`[data-amt="${i}"]`).textContent = `−${money(charge)}`;
+      const on = box.querySelector(`[data-r="${i}"]`).checked;
+      box.querySelector(`[data-amt="${i}"]`).classList.toggle('on', on);
+      if (on) total += charge;
+    });
+    const net = Math.max(0, Math.round((full - total) * 100) / 100);
+    const out = box.querySelector('[data-total]');
+    if (out) { out.textContent = money(net); out.classList.toggle('warn', total > 0); }
+  };
+  box.addEventListener('input', (ev) => {
+    if (ev.target.matches('[data-late]')) box.querySelector(`[data-r="${ev.target.dataset.late}"]`).checked = true;
+    update();
+  });
+}
+
 export const lateMinutes = (a, e) => (a.checkin_at ? Math.round((new Date(a.checkin_at) - new Date(e.start_at)) / 6e4) : 0);
